@@ -61,6 +61,7 @@ class MarketIngestor(BaseIngestor):
                     url=url,
                     timestamp=timestamp,
                     content_hash=compute_content_hash(content),
+                    signal_role="benchmark",
                 ))
 
             logger.info(f"Market: Retrieved {len(markets)} active markets from Polymarket")

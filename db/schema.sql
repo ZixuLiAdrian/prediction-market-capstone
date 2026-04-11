@@ -8,11 +8,12 @@ CREATE TABLE IF NOT EXISTS events (
     id              SERIAL PRIMARY KEY,
     title           TEXT NOT NULL DEFAULT '',
     content         TEXT NOT NULL,
-    source          VARCHAR(100) NOT NULL,    -- e.g. "reuters", "bbc", "gdelt", "polymarket"
-    source_type     VARCHAR(20) NOT NULL,     -- "rss", "gdelt", "market"
+    source          VARCHAR(100) NOT NULL,    -- e.g. "reuters", "bbc", "gdelt", "polymarket", "reddit", "sec_edgar"
+    source_type     VARCHAR(20) NOT NULL,     -- "rss", "gdelt", "market", "social", "official"
     url             TEXT DEFAULT '',
     entities        TEXT DEFAULT '',           -- comma-separated entity names
     content_hash    VARCHAR(64) UNIQUE,       -- SHA256 for deduplication
+    signal_role     VARCHAR(20) DEFAULT 'discovery',  -- discovery | resolution | benchmark | attention
     timestamp       TIMESTAMP NOT NULL DEFAULT NOW(),
     created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_source_type ON events(source_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_content_hash ON events(content_hash);
+CREATE INDEX IF NOT EXISTS idx_events_signal_role ON events(signal_role);
 
 -- ============================================================
 -- FR2: Event Clustering
@@ -31,6 +33,9 @@ CREATE TABLE IF NOT EXISTS clusters (
     source_diversity    INTEGER DEFAULT 0,         -- unique source count
     recency             FLOAT DEFAULT 0.0,         -- hours since most recent event
     size                INTEGER DEFAULT 0,         -- number of events in cluster
+    source_role_mix     JSONB DEFAULT '{}',        -- {"discovery": 3, "attention": 5, ...}
+    coherence_score     FLOAT DEFAULT 0.0,         -- avg pairwise embedding similarity
+    weighted_mention_velocity FLOAT DEFAULT 0.0,   -- source-weighted mentions per hour
     created_at          TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -45,17 +50,28 @@ CREATE TABLE IF NOT EXISTS cluster_events (
 -- FR3: LLM Event Extraction
 -- ============================================================
 CREATE TABLE IF NOT EXISTS extracted_events (
-    id                  SERIAL PRIMARY KEY,
-    cluster_id          INTEGER REFERENCES clusters(id) ON DELETE CASCADE,
-    event_summary       TEXT NOT NULL,
-    entities            JSONB DEFAULT '[]',        -- list of entity strings
-    time_horizon        VARCHAR(200) DEFAULT '',
-    resolution_hints    JSONB DEFAULT '[]',        -- list of hint strings
-    raw_llm_response    TEXT DEFAULT '',            -- full LLM response for debugging
-    created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+    id                    SERIAL PRIMARY KEY,
+    cluster_id            INTEGER REFERENCES clusters(id) ON DELETE CASCADE,
+    event_summary         TEXT NOT NULL,
+    entities              JSONB DEFAULT '[]',
+    event_type            VARCHAR(50) DEFAULT '',
+    outcome_variable      TEXT DEFAULT '',
+    candidate_deadlines   JSONB DEFAULT '[]',
+    resolution_sources    JSONB DEFAULT '[]',
+    tradability           VARCHAR(20) DEFAULT 'suitable',
+    rejection_reason      TEXT DEFAULT '',
+    confidence            FLOAT DEFAULT 0.5,
+    market_angle          TEXT DEFAULT '',
+    contradiction_flag    BOOLEAN DEFAULT FALSE,
+    contradiction_details TEXT DEFAULT '',
+    time_horizon          VARCHAR(200) DEFAULT '',
+    resolution_hints      JSONB DEFAULT '[]',
+    raw_llm_response      TEXT DEFAULT '',
+    created_at            TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_extracted_cluster ON extracted_events(cluster_id);
+CREATE INDEX IF NOT EXISTS idx_extracted_tradability ON extracted_events(tradability);
 
 -- ============================================================
 -- FR4-FR7: Placeholder tables for teammates

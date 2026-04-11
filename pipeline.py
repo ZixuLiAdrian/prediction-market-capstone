@@ -24,9 +24,19 @@ from db.connection import init_db, get_all_events, insert_cluster, get_clusters_
 from ingestion.rss_ingest import RSSIngestor
 from ingestion.gdelt_ingest import GDELTIngestor
 from ingestion.market_ingest import MarketIngestor
+from ingestion.reddit_ingest import RedditIngestor
+from ingestion.hn_ingest import HackerNewsIngestor
+from ingestion.wikipedia_ingest import WikipediaIngestor
+from ingestion.federal_register_ingest import FederalRegisterIngestor
+from ingestion.congress_ingest import CongressIngestor
+from ingestion.sec_ingest import SECIngestor
+from ingestion.bls_ingest import BLSIngestor
+from ingestion.fred_ingest import FREDIngestor
+from ingestion.eia_ingest import EIAIngestor
+from ingestion.kalshi_ingest import KalshiIngestor
 from clustering.embedder import Embedder
 from clustering.cluster import ClusterEngine
-from clustering.features import build_clusters
+from clustering.features import build_clusters, deduplicate_near_duplicates
 from extraction.extractor import EventExtractor
 
 logger = logging.getLogger(__name__)
@@ -36,15 +46,36 @@ logger = logging.getLogger(__name__)
 
 def run_ingestion():
     """FR1: Run all configured ingestors."""
-    ingestors = [RSSIngestor(), GDELTIngestor(), MarketIngestor()]
+    ingestors = [
+        # News / discovery sources
+        RSSIngestor(),
+        GDELTIngestor(),
+        # Social / attention sources
+        RedditIngestor(),
+        HackerNewsIngestor(),
+        WikipediaIngestor(),
+        # Official / resolution sources
+        FederalRegisterIngestor(),
+        CongressIngestor(),
+        SECIngestor(),
+        BLSIngestor(),
+        FREDIngestor(),
+        EIAIngestor(),
+        # Market / benchmark sources
+        MarketIngestor(),
+        KalshiIngestor(),
+    ]
     total_new = 0
     for ingestor in ingestors:
-        total_new += ingestor.ingest()
+        try:
+            total_new += ingestor.ingest()
+        except Exception as e:
+            logger.warning(f"Ingestor {ingestor.__class__.__name__} failed: {e}")
     logger.info(f"FR1 complete: {total_new} new events ingested")
 
 
 def run_clustering():
-    """FR2: Embed events and cluster them."""
+    """FR2: Embed events, deduplicate near-duplicates, and cluster."""
     events = get_all_events()
     if not events:
         logger.warning("FR2: No events to cluster")
@@ -55,12 +86,19 @@ def run_clustering():
     texts = [e.content for e in events]
     embeddings = embedder.embed(texts)
 
-    # Cluster
-    engine = ClusterEngine()
-    label_to_events = engine.cluster(embeddings, events)
+    # Near-duplicate detection before clustering
+    events = deduplicate_near_duplicates(events, embeddings)
+    # Re-embed if deduplication removed items
+    if len(events) < len(texts):
+        texts = [e.content for e in events]
+        embeddings = embedder.embed(texts)
 
-    # Compute features and filter
-    clusters = build_clusters(label_to_events)
+    # Cluster (with embeddings for coherence computation)
+    engine = ClusterEngine()
+    label_to_events, label_to_embeddings = engine.cluster_with_embeddings(embeddings, events)
+
+    # Compute features (including coherence, source_role_mix, weighted velocity) and filter
+    clusters = build_clusters(label_to_events, label_to_embeddings=label_to_embeddings)
 
     # Save to DB
     for cluster in clusters:
@@ -71,7 +109,7 @@ def run_clustering():
 
 
 def run_extraction():
-    """FR3: Extract structured events from clusters using LLM."""
+    """FR3: Extract structured, market-ready event specs from clusters using LLM."""
     clusters = get_clusters_for_extraction()
     if not clusters:
         logger.warning("FR3: No clusters to extract (all already processed or none exist)")

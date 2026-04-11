@@ -50,6 +50,7 @@ class RSSIngestor(BaseIngestor):
                         url=link,
                         timestamp=timestamp,
                         content_hash=compute_content_hash(content),
+                        signal_role="discovery",
                     ))
 
                 logger.info(f"RSS: Parsed {len(feed.entries)} entries from {source_name}")

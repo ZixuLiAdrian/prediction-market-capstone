@@ -62,6 +62,7 @@ class GDELTIngestor(BaseIngestor):
                     url=url,
                     timestamp=timestamp,
                     content_hash=compute_content_hash(content),
+                    signal_role="discovery",
                 ))
 
             logger.info(f"GDELT: Retrieved {len(articles)} articles")
