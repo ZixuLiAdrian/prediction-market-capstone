@@ -173,6 +173,32 @@ Logs go to stdout and `pipeline.log`.
 python -m streamlit run streamlit_app.py
 ```
 
+## Logging and Debug Mode
+
+The pipeline uses structured logging (timestamp, level, logger name, message) with output to **stdout** and **`pipeline.log`**.
+
+### Default behavior
+
+- The root log level follows **`LOG_LEVEL`** in `.env` (default: `INFO`)
+- At `INFO`, output is **concise and stage-oriented**, showing:
+  - pipeline start and completion
+  - stage start and completion (with elapsed time)
+  - summary counts (e.g. questions generated, validated, scored)
+- **Per-question logs** (FR4–FR6) and the detailed **FR6 score breakdown** are emitted at `DEBUG` level and are hidden in normal runs
+- Setting `LOG_LEVEL=DEBUG` in `.env` will expose these debug logs, while keeping third-party libraries quiet
+- Third-party loggers (`httpx`, `groq`, `groq._base_client`) are set to `WARNING` to suppress routine HTTP and retry noise
+
+### Debug mode
+
+```bash
+python pipeline.py --debug
+python pipeline.py --stage 6 --debug
+```
+
+- **`--debug`** forces the root logger to **`DEBUG`** (overrides **`LOG_LEVEL`** for that run).
+- The same flags raise **`httpx`**, **`groq`**, and **`groq._base_client`** to **`INFO`** so LLM transport is easier to inspect.
+- Use **`--debug`** for development and troubleshooting; omit it for readable demos and routine runs.
+
 ## Configurable event cap (`MAX_EVENTS`)
 
 In `pipeline.py`, **`MAX_EVENTS`** limits how many **extracted events** are passed into **FR4 (LLM question generation)**:
