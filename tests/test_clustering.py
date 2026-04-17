@@ -4,7 +4,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from datetime import datetime, timedelta
+from datetime import datetime, UTC, timedelta
 import numpy as np
 
 from clustering.cluster import ClusterEngine
@@ -14,7 +14,7 @@ from models import Event, ClusterFeatures
 
 def _make_events(n, source_prefix="src", hours_ago_start=0):
     """Helper to create test events."""
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     return [
         Event(
             content=f"Event {i} about topic",
@@ -64,9 +64,9 @@ def test_compute_features_basic():
 def test_source_diversity_count():
     """Source diversity should count unique sources."""
     events = [
-        Event(content="a", source="reuters", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="b", source="bbc", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="c", source="reuters", source_type="rss", timestamp=datetime.utcnow()),
+        Event(content="a", source="reuters", source_type="rss", timestamp=datetime.now(UTC)),
+        Event(content="b", source="bbc", source_type="rss", timestamp=datetime.now(UTC)),
+        Event(content="c", source="reuters", source_type="rss", timestamp=datetime.now(UTC)),
     ]
     features = compute_cluster_features(events)
     assert features.source_diversity == 2  # reuters and bbc

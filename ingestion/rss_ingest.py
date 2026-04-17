@@ -6,7 +6,7 @@ Feed URLs are loaded from config — no hardcoded URLs in this file.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List
 
 import feedparser
@@ -40,7 +40,7 @@ class RSSIngestor(BaseIngestor):
                     if published:
                         timestamp = datetime(*published[:6])
                     else:
-                        timestamp = datetime.utcnow()
+                        timestamp = datetime.now(UTC)
 
                     events.append(Event(
                         title=title,

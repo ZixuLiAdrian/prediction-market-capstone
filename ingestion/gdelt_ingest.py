@@ -6,7 +6,7 @@ matching configured search terms.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List
 
 import requests
@@ -46,11 +46,11 @@ class GDELTIngestor(BaseIngestor):
 
                 if date_str:
                     try:
-                        timestamp = datetime.strptime(date_str, "%Y%m%dT%H%M%SZ")
+                        timestamp = datetime.strptime(date_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
                     except ValueError:
-                        timestamp = datetime.utcnow()
+                        timestamp = datetime.now(UTC)
                 else:
-                    timestamp = datetime.utcnow()
+                    timestamp = datetime.now(UTC)
 
                 content = title  # GDELT DOC API returns titles, not full text
 

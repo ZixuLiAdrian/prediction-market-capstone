@@ -106,9 +106,13 @@ def insert_cluster(cluster: Cluster) -> int:
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (cluster.label, cluster.features.mention_velocity,
-             cluster.features.source_diversity, cluster.features.recency,
-             len(cluster.events)),
+            (
+                int(cluster.label),
+                float(cluster.features.mention_velocity),
+                int(cluster.features.source_diversity),
+                float(cluster.features.recency),
+                int(len(cluster.events)),
+            ),
         )
         cluster_id = cur.fetchone()["id"]
 
@@ -116,7 +120,7 @@ def insert_cluster(cluster: Cluster) -> int:
             if event.id is not None:
                 cur.execute(
                     "INSERT INTO cluster_events (cluster_id, event_id) VALUES (%s, %s)",
-                    (cluster_id, event.id),
+                    (int(cluster_id), int(event.id)),
                 )
     return cluster_id
 
@@ -348,6 +352,9 @@ def get_validated_questions_for_scoring() -> List[Dict]:
             SELECT
                 cq.id AS question_id,
                 cq.question_text,
+                cq.category,
+                cq.deadline,
+                cq.resolution_source,
                 c.mention_velocity,
                 c.source_diversity,
                 vr.clarity_score
@@ -412,3 +419,33 @@ def insert_scored_candidate(scored: ScoredCandidate) -> int:
             ),
         )
         return cur.fetchone()["id"]
+
+
+def get_ranked_scored_questions(limit: int = 10) -> List[Dict]:
+    """
+    Retrieve already-scored questions with metadata for Streamlit display.
+    Reads DB state only; does not re-run scoring.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                sc.question_id,
+                sc.rank,
+                sc.total_score,
+                sc.mention_velocity_score,
+                sc.source_diversity_score,
+                sc.clarity_score,
+                sc.novelty_score,
+                cq.question_text,
+                cq.category,
+                cq.deadline,
+                cq.resolution_source
+            FROM scored_candidates sc
+            JOIN candidate_questions cq ON cq.id = sc.question_id
+            ORDER BY sc.rank ASC, sc.question_id ASC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return cur.fetchall()

@@ -37,9 +37,13 @@ from clustering.features import build_clusters
 from extraction.extractor import EventExtractor
 from generation.generator import QuestionGenerator
 from validation.validator import validate_question
-from scoring.scorer import score_questions
+from scoring.scorer import score_questions_with_breakdown
 
 logger = logging.getLogger(__name__)
+
+# Limits number of events processed for faster demo runs.
+# Set to None to process all events.
+MAX_EVENTS = 5  # set to None for no limit
 
 
 # ---- Stage implementations ----
@@ -100,6 +104,8 @@ def run_extraction():
 def run_question_generation():
     """FR4: Generate candidate prediction market questions from extracted events."""
     events = get_extracted_events_for_generation()
+    if MAX_EVENTS is not None:
+        events = events[:MAX_EVENTS]
     if not events:
         logger.warning("FR4: No extracted events to generate questions for (all already processed or none exist)")
         return
@@ -140,16 +146,45 @@ def run_scoring():
         return
 
     all_question_texts_by_id = get_all_candidate_question_texts()
-    scored_candidates = score_questions(rows, all_question_texts_by_id)
+    scored_candidates, breakdowns = score_questions_with_breakdown(rows, all_question_texts_by_id)
 
     for scored in scored_candidates:
+        breakdown = breakdowns.get(scored.question_id, {})
+        component_scores = breakdown.get("component_scores", {})
+        quality_flags = breakdown.get("quality_flags", {})
+
+        logger.info(
+            f"[RANK {scored.rank}] Q{scored.question_id} | total={scored.total_score:.4f} | "
+            f"{breakdown.get('question_text', '')}"
+        )
+
         scored_id = insert_scored_candidate(scored)
+
         logger.info(
             f"Saved scored candidate {scored_id} for question {scored.question_id}: "
             f"total={scored.total_score:.4f}, rank={scored.rank}"
         )
-
-    logger.info(f"FR6 complete: {len(scored_candidates)} validated questions scored")
+        logger.info(
+            "FR6 breakdown | "
+            f"question_id={breakdown.get('question_id', scored.question_id)} | "
+            f"question_text={breakdown.get('question_text', '')} | "
+            f"rank={breakdown.get('rank', scored.rank)} | "
+            f"total_score={breakdown.get('total_score', scored.total_score):.4f} | "
+            f"clarity_score={component_scores.get('clarity_score', 0.0):.4f} | "
+            f"mention_velocity_score={component_scores.get('mention_velocity_score', 0.0):.4f} | "
+            f"source_diversity_score={component_scores.get('source_diversity_score', 0.0):.4f} | "
+            f"novelty_score={component_scores.get('novelty_score', 0.0):.4f} | "
+            f"market_interest_score={component_scores.get('market_interest_score', 0.0):.4f} | "
+            f"resolution_strength_score={component_scores.get('resolution_strength_score', 0.0):.4f} | "
+            f"time_horizon_score={component_scores.get('time_horizon_score', 0.0):.4f} | "
+            f"homepage_source={quality_flags.get('homepage_source', False)} | "
+            f"promo_event={quality_flags.get('promo_event', False)} | "
+            f"retail_promo_event={quality_flags.get('retail_promo_event', False)} | "
+            f"low_significance_event={quality_flags.get('low_significance_event', False)} | "
+            f"near_duplicate_theme={quality_flags.get('near_duplicate_theme', False)} | "
+            f"weather_event={quality_flags.get('weather_event', False)} | "
+            f"final_clamped_score={breakdown.get('final_clamped_score', scored.total_score):.4f}"
+        )
 
 
 # ---- Stage registry ----
@@ -188,9 +223,9 @@ def run_pipeline(start: int = 1, end: int = None):
     pipeline_start = time.time()
 
     for i, (name, stage_fn) in enumerate(STAGES[start - 1 : end], start=start):
-        logger.info(f"\n{'─' * 40}")
+        logger.info(f"\n{'-' * 40}")
         logger.info(f"Stage {i}/{len(STAGES)}: {name}")
-        logger.info(f"{'─' * 40}")
+        logger.info(f"{'-' * 40}")
 
         stage_start = time.time()
         try:

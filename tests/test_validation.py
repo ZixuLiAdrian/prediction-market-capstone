@@ -2,7 +2,7 @@
 
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, UTC, timedelta
 
 import pytest
 
@@ -67,7 +67,7 @@ def test_invalid_deadline_window_malformed_and_past():
     malformed_result = validate_question(malformed)
     assert "invalid_deadline_window" in malformed_result.flags
 
-    past_str = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%d")
+    past_str = (datetime.now(UTC) - timedelta(days=3)).strftime("%Y-%m-%d")
     past = _base_question(deadline=past_str)
     past_result = validate_question(past)
     assert "invalid_deadline_window" in past_result.flags

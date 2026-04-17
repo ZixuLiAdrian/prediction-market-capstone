@@ -5,7 +5,7 @@ FR5: Deterministic rule validation for candidate questions.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, UTC
 
 from models import CandidateQuestion, ValidationResult
 
@@ -105,7 +105,7 @@ def detect_invalid_deadline_window(deadline: str) -> bool:
     parsed = _try_parse_deadline(deadline)
     if parsed is None:
         return True
-    return parsed.date() < datetime.utcnow().date()
+    return parsed.date() < datetime.now(UTC).date()
 
 
 def detect_unclear_binary_condition(question_text: str, question_type: str) -> bool:
@@ -132,9 +132,20 @@ def validate_question(q: CandidateQuestion) -> ValidationResult:
         flags.append("unclear_binary_condition")
 
     clarity_score = compute_clarity_score(flags)
+    is_valid = len(flags) == 0
+
+    if not is_valid:
+        print("\n❌ VALIDATION FAILED")
+        print("Question:", q.question_text)
+        print("Flags:", flags)
+        print("Criteria:", q.resolution_criteria)
+        print("Source:", q.resolution_source)
+        print("Deadline:", q.deadline)
+        print("-" * 50)
+
     return ValidationResult(
         question_id=q.id or 0,
-        is_valid=len(flags) == 0,
+        is_valid=is_valid,
         flags=flags,
         clarity_score=clarity_score,
     )

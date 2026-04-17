@@ -6,7 +6,7 @@ These features are used by FR6 (scoring) downstream.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List
 
 from models import Event, Cluster, ClusterFeatures
@@ -40,7 +40,7 @@ def compute_cluster_features(events: List[Event]) -> ClusterFeatures:
     source_diversity = len(sources)
 
     # Recency: hours since most recent event
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     most_recent = max(timestamps)
     recency = (now - most_recent).total_seconds() / 3600
 
