@@ -13,8 +13,8 @@ The system is a six-stage sequential pipeline:
                           → Question Generation (FR4) → Rule Validation (FR5) → Scoring (FR6) → Dashboard (FR7)
 ```
 
-- **FR1-FR3** (implemented): Data processing and AI extraction
-- **FR4-FR7** (planned): Question generation, validation, scoring, and user interface
+- **FR1-FR4** (implemented): Data ingestion, clustering, extraction, and question generation
+- **FR5-FR7** (planned): Rule validation, scoring, and user interface
 
 ## Setup
 
@@ -56,13 +56,15 @@ All parameters are configured via `.env` (see `.env.example` for full list):
 ## Running the Pipeline
 
 ```bash
-# Run full pipeline (FR1 → FR2 → FR3)
+# Run full pipeline (FR1 → FR2 → FR3 → FR4)
 python pipeline.py
 
 # Run specific stages
 python pipeline.py --stage 1      # FR1 only
 python pipeline.py --stage 1-2    # FR1 and FR2
 python pipeline.py --stage 3      # FR3 only
+python pipeline.py --stage 4      # FR4 only
+python pipeline.py --stage 1-4    # Full pipeline
 ```
 
 Logs are written to both stdout and `pipeline.log`.
@@ -78,14 +80,14 @@ python -m pytest tests/ -v
 ```
 prediction-market-pipeline/
 ├── config.py                  # Centralized configuration from .env
-├── models.py                  # Shared data models (Event, Cluster, ExtractedEvent)
+├── models.py                  # Shared data models (Event, Cluster, ExtractedEvent, CandidateQuestion)
 ├── pipeline.py                # Pipeline orchestrator with composable stages
 ├── db/
 │   ├── schema.sql             # PostgreSQL schema (FR1-FR7 tables)
 │   └── connection.py          # DB helpers
 ├── ingestion/                 # FR1: Event Ingestion
 │   ├── base.py                # BaseIngestor ABC (extend for new sources)
-│   ├── rss_ingest.py          # RSS feed ingestion
+│   ├── rss_ingest.py          # RSS feed ingestion (30 feeds: 15 news + 15 Reddit)
 │   ├── gdelt_ingest.py        # GDELT API ingestion
 │   └── market_ingest.py       # Polymarket ingestion
 ├── clustering/                # FR2: Event Clustering
@@ -97,7 +99,11 @@ prediction-market-pipeline/
 │   ├── prompts.py             # Prompt templates
 │   ├── schema.py              # JSON schema for extraction output
 │   └── extractor.py           # Extraction orchestrator
-├── tests/                     # Unit tests
+├── generation/                # FR4: LLM Question Generation
+│   ├── schema.py              # JSON schema for question output (13 categories, binary/MC)
+│   ├── prompts.py             # System prompt with few-shot examples and novelty guidance
+│   └── generator.py           # QuestionGenerator with content safety and validation
+├── tests/                     # Unit tests (51 tests covering FR1-FR4)
 └── sample_outputs/            # Evidence of execution
 ```
 
@@ -122,13 +128,24 @@ prediction-market-pipeline/
 - Automatic retry on malformed responses
 - Reusable `LLMClient` class for downstream FR4 integration
 
-## Planned Features (FR4-FR7)
+### FR4: LLM Question Generation
+- Generates 1-3 candidate prediction market questions per extracted event
+- Supports **binary** (Yes/No) and **multiple-choice** (3-5 options) question types
+- 13-category classification: politics, finance, technology, geopolitics, science, health, business, sports, energy, legal, environment, space, other
+- Each question includes a verifiable `resolution_source` (authoritative org + URL) and `deadline_source` (official schedule URL confirming the deadline)
+- Few-shot prompting with diverse domain examples (Fed policy, FDA approvals, earnings, NATO)
+- Novelty-focused: prioritizes underserved domains (health, climate, space, supply chain, geopolitics)
+- Two-layer quality enforcement: JSON schema validation + post-generation content filter
+- Content safety filter: blocks profanity (prefix word-boundary regex), garbled text (>30% non-ASCII), vague deadlines
+- Idempotent: skips already-processed events on re-run
+- Expanded FR1 data sources: 30 RSS feeds (15 major news outlets + 15 Reddit subreddits) and broadened GDELT keywords across 14 domains
+
+## Planned Features (FR5-FR7)
 
 Teammates should implement these by extending the pipeline:
 
-- **FR4: Question Generation** — Use `LLMClient` to generate candidate market questions from `ExtractedEvent`
-- **FR5: Rule Validation** — Deterministic checks on candidate questions
-- **FR6: Heuristic Scoring** — Weighted scoring using cluster features
+- **FR5: Rule Validation** — Deterministic checks on `CandidateQuestion` objects
+- **FR6: Heuristic Scoring** — Weighted scoring using cluster features (mention_velocity, source_diversity, clarity, novelty)
 - **FR7: Dashboard** — Streamlit UI reading from `scored_candidates` table
 
 To add a new stage, append to `STAGES` in `pipeline.py`.
@@ -146,5 +163,5 @@ To add a new stage, append to `STAGES` in `pipeline.py`.
 | Member | Responsibility |
 |---|---|
 | Zixu Li | FR1-FR3 (Ingestion, Clustering, LLM Extraction) |
-| Jack Jia | TBD |
+| Jack Jia | FR4 (LLM Question Generation) |
 | Jia Herng Yap | TBD |
