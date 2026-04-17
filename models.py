@@ -5,7 +5,8 @@ These dataclasses define the contract between pipeline stages:
 - FR1 (Ingestion) produces Event objects
 - FR2 (Clustering) produces Cluster objects containing Events
 - FR3 (Extraction) produces ExtractedEvent objects from Clusters
-- FR4+ (downstream) consumes ExtractedEvent to generate questions, validate, score
+- FR4 (Question Generation) produces CandidateQuestion objects from ExtractedEvents
+- FR5+ (downstream) consumes CandidateQuestion to validate, score, publish
 """
 
 from dataclasses import dataclass, field
@@ -59,3 +60,25 @@ class ExtractedEvent:
     resolution_hints: List[str]           # possible resolution criteria
     id: Optional[int] = None
     raw_llm_response: Optional[str] = None  # for debugging
+
+
+@dataclass
+class CandidateQuestion:
+    """
+    A prediction market question produced by FR4 (LLM Question Generation).
+
+    THIS IS THE HANDOFF CONTRACT FOR FR5:
+    Downstream modules (rule validation, scoring, publishing) consume this object.
+    """
+    extracted_event_id: int
+    question_text: str                     # the market question, ends with "?"
+    category: str                          # one of 13 categories (politics, finance, etc.)
+    question_type: str                     # "binary" or "multiple_choice"
+    options: List[str]                     # ["Yes", "No"] or 3-5 labelled options
+    deadline: str                          # ISO date string, e.g. "2025-09-30"
+    deadline_source: str                   # URL of official schedule confirming the deadline
+    resolution_source: str                 # authoritative org + URL for resolution
+    resolution_criteria: str               # plain-language logic for each option
+    rationale: str                         # why this question is interesting/novel
+    id: Optional[int] = None              # DB-assigned
+    raw_llm_response: Optional[str] = None  # full LLM response for debugging

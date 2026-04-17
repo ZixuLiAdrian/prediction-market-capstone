@@ -20,7 +20,11 @@ import time
 from typing import Callable, List, Tuple
 
 from config import PipelineConfig
-from db.connection import init_db, get_all_events, insert_cluster, get_clusters_for_extraction, insert_extracted_event
+from db.connection import (
+    init_db, get_all_events, insert_cluster,
+    get_clusters_for_extraction, insert_extracted_event,
+    get_extracted_events_for_generation, insert_candidate_question,
+)
 from ingestion.rss_ingest import RSSIngestor
 from ingestion.gdelt_ingest import GDELTIngestor
 from ingestion.market_ingest import MarketIngestor
@@ -28,6 +32,7 @@ from clustering.embedder import Embedder
 from clustering.cluster import ClusterEngine
 from clustering.features import build_clusters
 from extraction.extractor import EventExtractor
+from generation.generator import QuestionGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +92,30 @@ def run_extraction():
     logger.info(f"FR3 complete: {len(extracted_events)} events extracted")
 
 
+def run_question_generation():
+    """FR4: Generate candidate prediction market questions from extracted events."""
+    events = get_extracted_events_for_generation()
+    if not events:
+        logger.warning("FR4: No extracted events to generate questions for (all already processed or none exist)")
+        return
+
+    generator = QuestionGenerator()
+    questions = generator.generate_batch(events)
+
+    for q in questions:
+        q_id = insert_candidate_question(q)
+        logger.info(f"Saved candidate question {q_id}: {q.question_text[:60]}...")
+
+    logger.info(f"FR4 complete: {len(questions)} candidate questions generated from {len(events)} events")
+
+
 # ---- Stage registry ----
 # Teammates: append your stages here
 STAGES: List[Tuple[str, Callable]] = [
     ("FR1: Event Ingestion", run_ingestion),
     ("FR2: Event Clustering", run_clustering),
     ("FR3: LLM Extraction", run_extraction),
-    # ("FR4: Question Generation", run_question_gen),
+    ("FR4: Question Generation", run_question_generation),
     # ("FR5: Rule Validation", run_validation),
     # ("FR6: Heuristic Scoring", run_scoring),
 ]

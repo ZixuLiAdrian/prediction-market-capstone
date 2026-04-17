@@ -14,7 +14,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from config import DBConfig
-from models import Event, Cluster, ClusterFeatures, ExtractedEvent
+from models import Event, Cluster, ClusterFeatures, ExtractedEvent, CandidateQuestion
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,84 @@ def get_extracted_events() -> List[ExtractedEvent]:
             entities=r["entities"] if isinstance(r["entities"], list) else json.loads(r["entities"]),
             time_horizon=r["time_horizon"],
             resolution_hints=r["resolution_hints"] if isinstance(r["resolution_hints"], list) else json.loads(r["resolution_hints"]),
+            raw_llm_response=r.get("raw_llm_response"),
+        )
+        for r in rows
+    ]
+
+
+def get_extracted_events_for_generation() -> List[ExtractedEvent]:
+    """Retrieve extracted events that haven't had questions generated yet (idempotent)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM extracted_events
+            WHERE id NOT IN (SELECT DISTINCT extracted_event_id FROM candidate_questions)
+            ORDER BY id
+            """
+        )
+        rows = cur.fetchall()
+    return [
+        ExtractedEvent(
+            id=r["id"], cluster_id=r["cluster_id"],
+            event_summary=r["event_summary"],
+            entities=r["entities"] if isinstance(r["entities"], list) else json.loads(r["entities"]),
+            time_horizon=r["time_horizon"],
+            resolution_hints=r["resolution_hints"] if isinstance(r["resolution_hints"], list) else json.loads(r["resolution_hints"]),
+            raw_llm_response=r.get("raw_llm_response"),
+        )
+        for r in rows
+    ]
+
+
+# ---- FR4: Candidate question helpers ----
+
+def insert_candidate_question(q: CandidateQuestion) -> int:
+    """Insert a candidate question. Returns its DB ID."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO candidate_questions
+                (extracted_event_id, question_text, category, question_type, options,
+                 deadline, deadline_source, resolution_source, resolution_criteria,
+                 rationale, raw_llm_response)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                q.extracted_event_id, q.question_text, q.category, q.question_type,
+                json.dumps(q.options), q.deadline, q.deadline_source,
+                q.resolution_source, q.resolution_criteria, q.rationale,
+                q.raw_llm_response or "",
+            ),
+        )
+        return cur.fetchone()["id"]
+
+
+def get_candidate_questions(extracted_event_id: Optional[int] = None) -> List[CandidateQuestion]:
+    """Retrieve candidate questions, optionally filtered by extracted_event_id."""
+    with get_cursor() as cur:
+        if extracted_event_id is not None:
+            cur.execute(
+                "SELECT * FROM candidate_questions WHERE extracted_event_id = %s ORDER BY id",
+                (extracted_event_id,),
+            )
+        else:
+            cur.execute("SELECT * FROM candidate_questions ORDER BY id")
+        rows = cur.fetchall()
+    return [
+        CandidateQuestion(
+            id=r["id"],
+            extracted_event_id=r["extracted_event_id"],
+            question_text=r["question_text"],
+            category=r["category"],
+            question_type=r["question_type"],
+            options=r["options"] if isinstance(r["options"], list) else json.loads(r["options"]),
+            deadline=r["deadline"],
+            deadline_source=r["deadline_source"],
+            resolution_source=r["resolution_source"],
+            resolution_criteria=r["resolution_criteria"],
+            rationale=r["rationale"],
             raw_llm_response=r.get("raw_llm_response"),
         )
         for r in rows

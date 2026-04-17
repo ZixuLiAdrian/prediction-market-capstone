@@ -67,11 +67,51 @@ CREATE TABLE IF NOT EXISTS candidate_questions (
     id                  SERIAL PRIMARY KEY,
     extracted_event_id  INTEGER REFERENCES extracted_events(id) ON DELETE CASCADE,
     question_text       TEXT NOT NULL,
-    deadline            VARCHAR(200) DEFAULT '',
-    resolution_source   TEXT DEFAULT '',
-    resolution_criteria TEXT DEFAULT '',
+    category            VARCHAR(50) DEFAULT '',       -- e.g. politics, finance, health
+    question_type       VARCHAR(20) DEFAULT '',       -- "binary" or "multiple_choice"
+    options             JSONB DEFAULT '[]',           -- list of option strings
+    deadline            VARCHAR(200) DEFAULT '',      -- ISO date string
+    deadline_source     TEXT DEFAULT '',              -- URL confirming the deadline date
+    resolution_source   TEXT DEFAULT '',              -- authoritative source org + URL
+    resolution_criteria TEXT DEFAULT '',              -- per-option resolution logic
+    rationale           TEXT DEFAULT '',              -- why this question is interesting
+    raw_llm_response    TEXT DEFAULT '',              -- full LLM JSON for debugging
     created_at          TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_cq_extracted_event ON candidate_questions(extracted_event_id);
+CREATE INDEX IF NOT EXISTS idx_cq_category ON candidate_questions(category);
+CREATE INDEX IF NOT EXISTS idx_cq_question_type ON candidate_questions(question_type);
+
+-- Migration guard: add new columns to existing deployments without dropping data
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='category') THEN
+        ALTER TABLE candidate_questions ADD COLUMN category VARCHAR(50) DEFAULT '';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='question_type') THEN
+        ALTER TABLE candidate_questions ADD COLUMN question_type VARCHAR(20) DEFAULT '';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='options') THEN
+        ALTER TABLE candidate_questions ADD COLUMN options JSONB DEFAULT '[]';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='deadline_source') THEN
+        ALTER TABLE candidate_questions ADD COLUMN deadline_source TEXT DEFAULT '';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='rationale') THEN
+        ALTER TABLE candidate_questions ADD COLUMN rationale TEXT DEFAULT '';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='raw_llm_response') THEN
+        ALTER TABLE candidate_questions ADD COLUMN raw_llm_response TEXT DEFAULT '';
+    END IF;
+END
+$$;
 
 -- FR5: Rule Validation
 CREATE TABLE IF NOT EXISTS validation_results (
