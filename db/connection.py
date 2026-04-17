@@ -8,13 +8,21 @@ Downstream modules (FR4-FR7) can import and extend these helpers.
 import json
 import logging
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from config import DBConfig
-from models import Event, Cluster, ClusterFeatures, ExtractedEvent, CandidateQuestion
+from models import (
+    Event,
+    Cluster,
+    ClusterFeatures,
+    ExtractedEvent,
+    CandidateQuestion,
+    ValidationResult,
+    ScoredCandidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -272,3 +280,135 @@ def get_candidate_questions(extracted_event_id: Optional[int] = None) -> List[Ca
         )
         for r in rows
     ]
+
+
+# ---- FR5: Validation helpers ----
+
+def get_candidate_questions_for_validation() -> List[CandidateQuestion]:
+    """Retrieve candidate questions that have not been validated yet (idempotent)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT cq.*
+            FROM candidate_questions cq
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM validation_results vr
+                WHERE vr.question_id = cq.id
+            )
+            ORDER BY cq.id
+            """
+        )
+        rows = cur.fetchall()
+    return [
+        CandidateQuestion(
+            id=r["id"],
+            extracted_event_id=r["extracted_event_id"],
+            question_text=r["question_text"],
+            category=r["category"],
+            question_type=r["question_type"],
+            options=r["options"] if isinstance(r["options"], list) else json.loads(r["options"]),
+            deadline=r["deadline"],
+            deadline_source=r["deadline_source"],
+            resolution_source=r["resolution_source"],
+            resolution_criteria=r["resolution_criteria"],
+            rationale=r["rationale"],
+            raw_llm_response=r.get("raw_llm_response"),
+        )
+        for r in rows
+    ]
+
+
+def insert_validation_result(result: ValidationResult) -> int:
+    """Insert FR5 validation result for a candidate question."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO validation_results (question_id, is_valid, flags, clarity_score)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                result.question_id,
+                result.is_valid,
+                json.dumps(result.flags),
+                result.clarity_score,
+            ),
+        )
+        return cur.fetchone()["id"]
+
+
+# ---- FR6: Scoring helpers ----
+
+def get_validated_questions_for_scoring() -> List[Dict]:
+    """Get validated and unscored questions with feature join data (idempotent)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                cq.id AS question_id,
+                cq.question_text,
+                c.mention_velocity,
+                c.source_diversity,
+                vr.clarity_score
+            FROM candidate_questions cq
+            JOIN extracted_events ee
+                ON ee.id = cq.extracted_event_id
+            JOIN clusters c
+                ON c.id = ee.cluster_id
+            JOIN validation_results vr
+                ON vr.question_id = cq.id
+            WHERE vr.is_valid = TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM scored_candidates sc
+                  WHERE sc.question_id = cq.id
+              )
+            ORDER BY cq.id
+            """
+        )
+        return cur.fetchall()
+
+
+def get_all_candidate_question_texts() -> List[Tuple[int, str]]:
+    """Return all candidate question ids and texts for novelty comparisons."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, question_text
+            FROM candidate_questions
+            ORDER BY id
+            """
+        )
+        rows = cur.fetchall()
+    return [(int(r["id"]), r["question_text"]) for r in rows]
+
+
+def insert_scored_candidate(scored: ScoredCandidate) -> int:
+    """Insert FR6 scored candidate row."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO scored_candidates (
+                question_id,
+                total_score,
+                mention_velocity_score,
+                source_diversity_score,
+                clarity_score,
+                novelty_score,
+                rank
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                scored.question_id,
+                scored.total_score,
+                scored.mention_velocity_score,
+                scored.source_diversity_score,
+                scored.clarity_score,
+                scored.novelty_score,
+                scored.rank,
+            ),
+        )
+        return cur.fetchone()["id"]

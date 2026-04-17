@@ -24,6 +24,9 @@ from db.connection import (
     init_db, get_all_events, insert_cluster,
     get_clusters_for_extraction, insert_extracted_event,
     get_extracted_events_for_generation, insert_candidate_question,
+    get_candidate_questions_for_validation, insert_validation_result,
+    get_validated_questions_for_scoring, insert_scored_candidate,
+    get_all_candidate_question_texts,
 )
 from ingestion.rss_ingest import RSSIngestor
 from ingestion.gdelt_ingest import GDELTIngestor
@@ -33,6 +36,8 @@ from clustering.cluster import ClusterEngine
 from clustering.features import build_clusters
 from extraction.extractor import EventExtractor
 from generation.generator import QuestionGenerator
+from validation.validator import validate_question
+from scoring.scorer import score_questions
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,44 @@ def run_question_generation():
     logger.info(f"FR4 complete: {len(questions)} candidate questions generated from {len(events)} events")
 
 
+def run_validation():
+    """FR5: Run deterministic validation on candidate questions."""
+    questions = get_candidate_questions_for_validation()
+    if not questions:
+        logger.warning("FR5: No candidate questions to validate (all already processed or none exist)")
+        return
+
+    for q in questions:
+        result = validate_question(q)
+        result_id = insert_validation_result(result)
+        logger.info(
+            f"Saved validation result {result_id} for question {q.id}: "
+            f"is_valid={result.is_valid}, flags={len(result.flags)}, clarity={result.clarity_score:.2f}"
+        )
+
+    logger.info(f"FR5 complete: {len(questions)} questions validated")
+
+
+def run_scoring():
+    """FR6: Score validated candidate questions with deterministic heuristics."""
+    rows = get_validated_questions_for_scoring()
+    if not rows:
+        logger.warning("FR6: No validated questions to score (all already processed or none exist)")
+        return
+
+    all_question_texts_by_id = get_all_candidate_question_texts()
+    scored_candidates = score_questions(rows, all_question_texts_by_id)
+
+    for scored in scored_candidates:
+        scored_id = insert_scored_candidate(scored)
+        logger.info(
+            f"Saved scored candidate {scored_id} for question {scored.question_id}: "
+            f"total={scored.total_score:.4f}, rank={scored.rank}"
+        )
+
+    logger.info(f"FR6 complete: {len(scored_candidates)} validated questions scored")
+
+
 # ---- Stage registry ----
 # Teammates: append your stages here
 STAGES: List[Tuple[str, Callable]] = [
@@ -116,8 +159,8 @@ STAGES: List[Tuple[str, Callable]] = [
     ("FR2: Event Clustering", run_clustering),
     ("FR3: LLM Extraction", run_extraction),
     ("FR4: Question Generation", run_question_generation),
-    # ("FR5: Rule Validation", run_validation),
-    # ("FR6: Heuristic Scoring", run_scoring),
+    ("FR5: Rule Validation", run_validation),
+    ("FR6: Heuristic Scoring", run_scoring),
 ]
 
 

@@ -82,3 +82,30 @@ class CandidateQuestion:
     rationale: str                         # why this question is interesting/novel
     id: Optional[int] = None              # DB-assigned
     raw_llm_response: Optional[str] = None  # full LLM response for debugging
+
+
+@dataclass
+class ValidationResult:
+    """
+    FR5 output for deterministic rule validation of a CandidateQuestion.
+    """
+    question_id: int
+    is_valid: bool
+    flags: List[str]
+    clarity_score: float
+    id: Optional[int] = None
+
+
+@dataclass
+class ScoredCandidate:
+    """
+    FR6 output for heuristic scoring and ranking of validated questions.
+    """
+    question_id: int
+    total_score: float
+    mention_velocity_score: float
+    source_diversity_score: float
+    clarity_score: float
+    novelty_score: float
+    rank: int = 0
+    id: Optional[int] = None

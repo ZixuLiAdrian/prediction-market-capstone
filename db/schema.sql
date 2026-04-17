@@ -119,8 +119,18 @@ CREATE TABLE IF NOT EXISTS validation_results (
     question_id         INTEGER REFERENCES candidate_questions(id) ON DELETE CASCADE,
     is_valid            BOOLEAN DEFAULT FALSE,
     flags               JSONB DEFAULT '[]',        -- list of validation flag strings
+    clarity_score       FLOAT DEFAULT 0.0,
     created_at          TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='validation_results' AND column_name='clarity_score') THEN
+        ALTER TABLE validation_results ADD COLUMN clarity_score FLOAT DEFAULT 0.0;
+    END IF;
+END
+$$;
 
 -- FR6: Heuristic Scoring
 CREATE TABLE IF NOT EXISTS scored_candidates (
