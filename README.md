@@ -58,13 +58,23 @@ All stages write intermediate outputs to PostgreSQL; downstream stages read from
 - JSON schema validation with post-generation content filtering
 - Idempotent processing (skips events already processed for generation)
 
-## FR5: Deterministic validation
+### FR5: Deterministic validation
+- Enforces strict validation rules on generated questions before downstream use
+- Validates presence and format of required fields (question, type, options, category)
+- Ensures resolution criteria are clear, objective, and time-bounded
+- Verifies resolution_source and deadline_source are provided and well-formed URLs
+- Filters out ambiguous, vague, or non-verifiable questions
+- Deduplicates similar or overlapping questions across events
+- Rule-based validation ensures deterministic and reproducible outputs
 
-FR5 evaluates each `CandidateQuestion` with explicit rules (no LLM): wording and resolution clarity, resolution source and criteria strength, deadline parsing and plausibility, and binary question shape where applicable. It **flags invalid or weak questions and filters them from downstream scoring**—invalid rows remain in the database with their validation record; FR6 only consumes questions marked valid.
-
-## FR6: Scoring and ranking
-
-FR6 ranks questions that passed FR5 using **deterministic heuristics** (fixed formulas and weights, not learned models). Scores combine signals such as cluster-derived features, resolution-source strength, time-to-deadline, signals that proxy for market relevance and tradability, and **penalties** for low-value or noisy patterns. Each scored row carries a **total score**, **rank**, and enough structure to produce **component breakdowns** and short **explanation text** in logs and in the UI. The intent is **heuristic ordering aligned with how prediction-market listings are typically prioritized**, not a claim of parity with any live marketplace.
+### FR6: Scoring and ranking
+- Assigns quality scores to validated questions using heuristic-based metrics
+- Scoring factors include clarity, specificity, verifiability, and timeliness
+- Rewards questions with strong resolution criteria and reliable sources
+- Penalizes vague wording, weak sources, or missing fields
+- Ranks questions within each event to prioritize high-quality candidates
+- Outputs ranked question sets for downstream display or storage
+- Deterministic scoring ensures consistent results for identical inputs
 
 ## Streamlit UI
 
