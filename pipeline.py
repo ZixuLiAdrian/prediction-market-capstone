@@ -115,7 +115,7 @@ def run_question_generation():
 
     for q in questions:
         q_id = insert_candidate_question(q)
-        logger.info(f"Saved candidate question {q_id}: {q.question_text[:60]}...")
+        logger.debug(f"Saved candidate question {q_id}: {q.question_text[:60]}...")
 
     logger.info(f"FR4 complete: {len(questions)} candidate questions generated from {len(events)} events")
 
@@ -130,7 +130,7 @@ def run_validation():
     for q in questions:
         result = validate_question(q)
         result_id = insert_validation_result(result)
-        logger.info(
+        logger.debug(
             f"Saved validation result {result_id} for question {q.id}: "
             f"is_valid={result.is_valid}, flags={len(result.flags)}, clarity={result.clarity_score:.2f}"
         )
@@ -143,6 +143,7 @@ def run_scoring():
     rows = get_validated_questions_for_scoring()
     if not rows:
         logger.warning("FR6: No validated questions to score (all already processed or none exist)")
+        logger.info("FR6 complete: 0 validated questions scored")
         return
 
     all_question_texts_by_id = get_all_candidate_question_texts()
@@ -153,18 +154,18 @@ def run_scoring():
         component_scores = breakdown.get("component_scores", {})
         quality_flags = breakdown.get("quality_flags", {})
 
-        logger.info(
+        logger.debug(
             f"[RANK {scored.rank}] Q{scored.question_id} | total={scored.total_score:.4f} | "
             f"{breakdown.get('question_text', '')}"
         )
 
         scored_id = insert_scored_candidate(scored)
 
-        logger.info(
+        logger.debug(
             f"Saved scored candidate {scored_id} for question {scored.question_id}: "
             f"total={scored.total_score:.4f}, rank={scored.rank}"
         )
-        logger.info(
+        logger.debug(
             "FR6 breakdown | "
             f"question_id={breakdown.get('question_id', scored.question_id)} | "
             f"question_text={breakdown.get('question_text', '')} | "
@@ -186,6 +187,8 @@ def run_scoring():
             f"final_clamped_score={breakdown.get('final_clamped_score', scored.total_score):.4f}"
         )
 
+    logger.info(f"FR6 complete: {len(scored_candidates)} validated questions scored")
+
 
 # ---- Stage registry ----
 # Teammates: append your stages here
@@ -199,19 +202,33 @@ STAGES: List[Tuple[str, Callable]] = [
 ]
 
 
-def run_pipeline(start: int = 1, end: int = None):
+def _root_log_level(debug: bool) -> int:
+    if debug:
+        return logging.DEBUG
+    name = (PipelineConfig.LOG_LEVEL or "INFO").upper()
+    return getattr(logging, name, logging.INFO)
+
+
+def _configure_third_party_loggers(debug: bool) -> None:
+    level = logging.INFO if debug else logging.WARNING
+    for log_name in ("httpx", "groq", "groq._base_client"):
+        logging.getLogger(log_name).setLevel(level)
+
+
+def run_pipeline(start: int = 1, end: int = None, debug: bool = False):
     """Run pipeline stages from start to end (1-indexed)."""
     if end is None:
         end = len(STAGES)
 
     logging.basicConfig(
-        level=getattr(logging, PipelineConfig.LOG_LEVEL),
+        level=_root_log_level(debug),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
             logging.FileHandler("pipeline.log"),
         ],
     )
+    _configure_third_party_loggers(debug)
 
     logger.info("=" * 60)
     logger.info("Prediction Market Pipeline — Starting")
@@ -250,14 +267,19 @@ if __name__ == "__main__":
         "--stage", type=str, default=None,
         help="Stage range to run, e.g. '1', '1-2', '2-3'. Default: run all."
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Verbose logging: DEBUG on root, per-item FR4/FR5/FR6 logs, and INFO on httpx/groq.",
+    )
     args = parser.parse_args()
 
     if args.stage:
         if "-" in args.stage:
             start, end = args.stage.split("-")
-            run_pipeline(start=int(start), end=int(end))
+            run_pipeline(start=int(start), end=int(end), debug=args.debug)
         else:
             stage = int(args.stage)
-            run_pipeline(start=stage, end=stage)
+            run_pipeline(start=stage, end=stage, debug=args.debug)
     else:
-        run_pipeline()
+        run_pipeline(debug=args.debug)
