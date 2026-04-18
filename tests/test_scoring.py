@@ -6,6 +6,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scoring.scorer import (
+    _compute_regulatory_penalty,
+    _has_regulatory_hard_exclude,
     compute_market_interest_score,
     compute_novelty_score,
     compute_resolution_strength_score,
@@ -662,4 +664,147 @@ def test_top_n_ranked_display_rows_shape_and_limit():
         "explanation",
         "score_breakdown",
     }
+
+
+# ---- Regulatory hard exclusion tests ----
+
+def test_has_regulatory_hard_exclude_prohibited_topic():
+    assert _has_regulatory_hard_exclude(["prohibited_topic:terrorism_content (terrorist)"]) is True
+
+
+def test_has_regulatory_hard_exclude_manipulation_risk():
+    assert _has_regulatory_hard_exclude(["manipulation_risk"]) is True
+
+
+def test_has_regulatory_hard_exclude_pii():
+    assert _has_regulatory_hard_exclude(["pii_exposure"]) is True
+
+
+def test_has_regulatory_hard_exclude_clean():
+    assert _has_regulatory_hard_exclude(["ambiguous_wording", "weak_resolution_source"]) is False
+
+
+def test_has_regulatory_hard_exclude_empty():
+    assert _has_regulatory_hard_exclude([]) is False
+
+
+# ---- Regulatory soft penalty tests ----
+
+def test_compute_regulatory_penalty_minor_involvement():
+    assert _compute_regulatory_penalty(["minor_involvement"]) == 0.15
+
+
+def test_compute_regulatory_penalty_excessive_deadline():
+    assert _compute_regulatory_penalty(["excessive_deadline"]) == 0.15
+
+
+def test_compute_regulatory_penalty_both():
+    assert _compute_regulatory_penalty(["minor_involvement", "excessive_deadline"]) == 0.30
+
+
+def test_compute_regulatory_penalty_no_flags():
+    assert _compute_regulatory_penalty([]) == 0.0
+
+
+def test_compute_regulatory_penalty_ignores_non_regulatory_flags():
+    assert _compute_regulatory_penalty(["ambiguous_wording", "weak_resolution_source"]) == 0.0
+
+
+# ---- Hard exclusion in scoring pipeline ----
+
+def test_regulatory_hard_exclude_removes_question_from_scoring():
+    rows = [
+        {
+            "question_id": 1,
+            "question_text": "Will Bitcoin close above $100,000 by December 31, 2026?",
+            "category": "finance",
+            "deadline": "December 31, 2026",
+            "resolution_source": "Binance at https://www.binance.com/en/trade/BTC_USDT",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+            "validation_flags": ["prohibited_topic:terrorism_content (terrorist)"],
+        },
+        {
+            "question_id": 2,
+            "question_text": "Will Apple stock close above $200 by December 31, 2026?",
+            "category": "finance",
+            "deadline": "December 31, 2026",
+            "resolution_source": "NASDAQ at https://www.nasdaq.com/market-activity/stocks/aapl",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+            "validation_flags": [],
+        },
+    ]
+    all_texts = [(1, rows[0]["question_text"]), (2, rows[1]["question_text"])]
+    scored = score_questions(rows, all_texts)
+    ids = [s.question_id for s in scored]
+    assert 1 not in ids
+    assert 2 in ids
+
+
+def test_regulatory_soft_penalty_lowers_score():
+    rows = [
+        {
+            "question_id": 1,
+            "question_text": "Will Apple stock close above $200 by December 31, 2026?",
+            "category": "finance",
+            "deadline": "December 31, 2026",
+            "resolution_source": "NASDAQ at https://www.nasdaq.com/market-activity/stocks/aapl",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+            "validation_flags": [],
+        },
+        {
+            "question_id": 2,
+            "question_text": "Will Google stock close above $200 by December 31, 2026?",
+            "category": "finance",
+            "deadline": "December 31, 2026",
+            "resolution_source": "NASDAQ at https://www.nasdaq.com/market-activity/stocks/googl",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+            "validation_flags": ["minor_involvement"],
+        },
+    ]
+    all_texts = [(1, rows[0]["question_text"]), (2, rows[1]["question_text"])]
+    scored = score_questions(rows, all_texts)
+    by_id = {s.question_id: s for s in scored}
+    assert by_id[2].total_score < by_id[1].total_score
+
+
+# ---- Expanded trusted source tests ----
+
+def test_trusted_source_government_domains():
+    assert is_trusted_resolution_source("BLS at https://www.bls.gov/data/") is True
+    assert is_trusted_resolution_source("Congress at https://congress.gov/bill/") is True
+    assert is_trusted_resolution_source("Federal Register at https://federalregister.gov/") is True
+    assert is_trusted_resolution_source("FRED at https://fred.stlouisfed.org/series/") is True
+    assert is_trusted_resolution_source("WHO at https://who.int/data/") is True
+    assert is_trusted_resolution_source("UN at https://un.org/en/") is True
+
+
+def test_trusted_source_sports_bodies():
+    assert is_trusted_resolution_source("FIFA at https://www.fifa.com/worldcup") is True
+    assert is_trusted_resolution_source("NBA at https://www.nba.com/standings") is True
+    assert is_trusted_resolution_source("ESPN at https://www.espn.com/nba/standings") is True
+
+
+def test_untrusted_source():
+    assert is_trusted_resolution_source("Random blog at https://myblog.example.com/") is False
+
+
+# ---- Updated homepage source tests ----
+
+def test_homepage_source_generic_path_check():
+    assert is_homepage_source("Site at https://example.com/") is True
+    assert is_homepage_source("Site at https://example.com/home") is True
+    assert is_homepage_source("Site at https://example.com/index.html") is True
+    assert is_homepage_source("Site at https://example.com/data/results") is False
+
+
+def test_homepage_source_no_url():
+    assert is_homepage_source("Just some text, no URL") is True
 

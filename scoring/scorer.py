@@ -1,15 +1,45 @@
 """
 FR6: Deterministic heuristic scoring for validated questions.
+
+Scoring components (7 weighted factors):
+- clarity_score (20%): from FR5 validation
+- mention_velocity_score (15%): normalized cluster mention velocity
+- source_diversity_score (10%): normalized source diversity
+- novelty_score (10%): Jaccard distance from prior questions
+- market_interest_score (30%): topic-based interest heuristic
+- resolution_strength_score (15%): quality of resolution source
+- time_horizon_score (10%): deadline practicality
+
+Penalties: promo events, weather, homepage sources, near-duplicates,
+low-significance, regulatory risk (prohibited topics, manipulation risk).
+
+Hard exclusions: media events, questions with regulatory flags.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, UTC
 from urllib.parse import urlparse
 import string
 import re
 
 from models import ScoredCandidate
+
+logger = logging.getLogger(__name__)
+
+# ---- Regulatory risk flags from FR5 that should be hard-excluded ----
+_HARD_EXCLUDE_FLAGS = {
+    "prohibited_topic",  # prefix match — covers all prohibited_topic:* flags
+    "manipulation_risk",
+    "pii_exposure",
+}
+
+# Flags that trigger a soft regulatory penalty
+_REGULATORY_PENALTY_FLAGS = {
+    "minor_involvement",
+    "excessive_deadline",
+}
 
 
 def normalize_minmax(value: float, vmin: float, vmax: float) -> float:
@@ -74,6 +104,26 @@ def _extract_url(text: str) -> str:
     return match.group(0).rstrip(".,;") if match else ""
 
 
+def _has_regulatory_hard_exclude(validation_flags: list[str]) -> bool:
+    """Check if any FR5 validation flag triggers a hard exclusion from scoring."""
+    for flag in validation_flags:
+        for exclude_prefix in _HARD_EXCLUDE_FLAGS:
+            if flag.startswith(exclude_prefix):
+                return True
+    return False
+
+
+def _compute_regulatory_penalty(validation_flags: list[str]) -> float:
+    """Compute penalty for regulatory risk flags that don't trigger hard exclusion."""
+    penalty = 0.0
+    for flag in validation_flags:
+        if flag in _REGULATORY_PENALTY_FLAGS:
+            penalty += 0.15
+    return penalty
+
+
+# ---- Source quality helpers ----
+
 def is_homepage_source(resolution_source: str) -> bool:
     url = _extract_url(resolution_source)
     if not url:
@@ -82,17 +132,10 @@ def is_homepage_source(resolution_source: str) -> bool:
     path = (parsed.path or "").strip("/")
     if not path:
         return True
-    homepage_like_hosts = {
-        "wired.com",
-        "www.wired.com",
-        "nike.com",
-        "www.nike.com",
-        "wunderground.com",
-        "www.wunderground.com",
-    }
-    if parsed.netloc.lower() in homepage_like_hosts and path in {"", "home", "homepage"}:
+    if path in ("home", "homepage", "index.html", "index.htm"):
         return True
     return False
+
 
 def is_trusted_resolution_source(resolution_source: str) -> bool:
     if not resolution_source:
@@ -101,34 +144,55 @@ def is_trusted_resolution_source(resolution_source: str) -> bool:
     s = resolution_source.lower()
 
     trusted_domains = [
+        # Government / regulatory
+        ".gov",
+        "sec.gov",
+        "fda.gov",
+        "ftc.gov",
+        "bls.gov",
+        "congress.gov",
+        "federalregister.gov",
+        "eia.gov",
+        "whitehouse.gov",
+        "treasury.gov",
+        "supremecourt.gov",
+        "ec.europa.eu",
+        "who.int",
+        "un.org",
+        # Financial exchanges and data
         "binance.com",
         "finance.yahoo.com",
-        "yahoo.com",
+        "yahoo.com/finance",
         "nasdaq.com",
         "nyse.com",
         "cmegroup.com",
         "coingecko.com",
         "coinbase.com",
+        "fred.stlouisfed.org",
+        "investing.com",
+        # Sports governing bodies
+        "fifa.com",
+        "nba.com",
+        "nfl.com",
+        "mlb.com",
+        "nhl.com",
+        "premierleague.com",
+        "uefa.com",
+        "olympics.com",
+        "espn.com",
     ]
 
     return any(domain in s for domain in trusted_domains)
 
 
+# ---- Topic detection helpers ----
+
 def _has_price_finance_terms(question_text: str) -> bool:
     text = normalize_text(question_text)
     terms = {
-        "bitcoin",
-        "btc",
-        "ethereum",
-        "eth",
-        "dogecoin",
-        "tesla",
-        "amazon",
-        "stock",
-        "closing price",
-        "adjusted closing price",
-        "split-adjusted closing price",
-        "price",
+        "bitcoin", "btc", "ethereum", "eth", "dogecoin",
+        "tesla", "amazon", "stock", "closing price",
+        "adjusted closing price", "split-adjusted closing price", "price",
     }
     return any(term in text for term in terms)
 
@@ -136,18 +200,9 @@ def _has_price_finance_terms(question_text: str) -> bool:
 def _is_major_sports_event(question_text: str) -> bool:
     text = normalize_text(question_text)
     major_terms = {
-        "world series",
-        "playoffs",
-        "playoff",
-        "championship",
-        "final",
-        "finals",
-        "title",
-        "relegated",
-        "relegation",
-        "super bowl",
-        "world cup",
-        "grand slam",
+        "world series", "playoffs", "playoff", "championship",
+        "final", "finals", "title", "relegated", "relegation",
+        "super bowl", "world cup", "grand slam",
     }
     return any(term in text for term in major_terms)
 
@@ -157,9 +212,9 @@ def _is_ordinary_match_question(question_text: str) -> bool:
     if any(t in text for t in ("next match", "upcoming match", "win against", "score more goals", "score more than")):
         return True
     match_words = ("match", "game", "fixture", "win", "score", "goals", "fc")
-    if "by april 30, 2026" in text and any(w in text for w in match_words):
-        return True
-    if "by may 1, 2026" in text and any(w in text for w in match_words):
+    # Detect near-term single-game questions by pattern rather than hardcoded dates
+    date_pattern = re.search(r"\bby\s+\w+\s+\d{1,2}\s*,?\s*\d{4}\b", text)
+    if date_pattern and any(w in text for w in match_words):
         return True
     return False
 
@@ -206,6 +261,8 @@ def is_weather_event(question_text: str) -> bool:
     return any(term in text for term in weather_terms)
 
 
+# ---- Score components ----
+
 def compute_market_interest_score(question_text: str, category: str) -> float:
     text = normalize_text(question_text)
     high_terms = {
@@ -223,8 +280,8 @@ def compute_market_interest_score(question_text: str, category: str) -> float:
     }
     sports_low_terms = {"regular season", "next match", "friendly", "preseason", "group stage", "prop"}
     major_sports_terms = {
-    "world series", "final", "finals", "championship",
-    "playoff", "title", "grand slam", "world cup"
+        "world series", "final", "finals", "championship",
+        "playoff", "title", "grand slam", "world cup",
     }
 
     if any(term in text for term in major_sports_terms):
@@ -249,8 +306,13 @@ def compute_resolution_strength_score(resolution_source: str) -> float:
     strong_host_signals = {
         ".gov", "sec.gov", "fda.gov", "ftc.gov", "ec.europa.eu",
         "nasdaq.com", "nyse.com", "cmegroup.com", "fifa.com", "nba.com",
+        "congress.gov", "bls.gov", "federalregister.gov",
+        "fred.stlouisfed.org", "who.int", "un.org",
     }
-    strong_path_signals = {"results", "standings", "scores", "edgar", "filing", "database", "data", "report"}
+    strong_path_signals = {
+        "results", "standings", "scores", "edgar", "filing",
+        "database", "data", "report", "statistics", "releases",
+    }
     weak_news_hosts = {"wired.com", "www.wired.com", "cnn.com", "www.cnn.com", "nytimes.com", "www.nytimes.com"}
 
     if is_homepage_source(resolution_source):
@@ -284,9 +346,7 @@ def compute_time_horizon_score(deadline: str) -> float:
     return 0.3
 
 
-def _theme_similarity_score(a: str, b: str) -> float:
-    return jaccard_similarity(tokenize_to_set(a), tokenize_to_set(b))
-
+# ---- Soft penalty system ----
 
 def _soft_penalty_flags(question_text: str, category: str, resolution_source: str, prior_kept_texts: list[str]) -> list[str]:
     flags: list[str] = []
@@ -300,50 +360,36 @@ def _soft_penalty_flags(question_text: str, category: str, resolution_source: st
         flags.append("weather_event")
     if is_low_significance_event(question_text, category):
         flags.append("low_significance_event")
-    if any(_theme_similarity_score(question_text, prior) >= 0.75 for prior in prior_kept_texts):
+    if any(jaccard_similarity(tokenize_to_set(question_text), tokenize_to_set(prior)) >= 0.75
+           for prior in prior_kept_texts):
         flags.append("near_duplicate_theme")
     return flags
 
 
-def _build_breakdown(
-    row: dict,
-    mention_velocity_score: float,
-    source_diversity_score: float,
-    clarity_score: float,
-    novelty_score: float,
-    market_interest_score: float,
-    resolution_strength_score: float,
-    time_horizon_score: float,
-    penalty: float,
-    final_score: float,
-) -> dict:
-    flags = set(row.get("quality_flags", []))
-    return {
-        "question_id": int(row["question_id"]),
-        "question_text": row.get("question_text", ""),
-        "rank": 0,
-        "total_score": final_score,
-        "component_scores": {
-            "clarity_score": clarity_score,
-            "mention_velocity_score": mention_velocity_score,
-            "source_diversity_score": source_diversity_score,
-            "novelty_score": novelty_score,
-            "market_interest_score": market_interest_score,
-            "resolution_strength_score": resolution_strength_score,
-            "time_horizon_score": time_horizon_score,
-        },
-        "quality_flags": {
-            "homepage_source": "homepage_source" in flags,
-            "promo_event": "promo_event" in flags,
-            "retail_promo_event": "retail_promo_event" in flags,
-            "low_significance_event": "low_significance_event" in flags,
-            "near_duplicate_theme": "near_duplicate_theme" in flags,
-            "weather_event": "weather_event" in flags,
-        },
-        "penalty_total": penalty,
-        "final_clamped_score": final_score,
-    }
+def _compute_soft_penalty(quality_flags: list[str], question_text: str, resolution_source: str) -> float:
+    penalty = 0.0
+    if "homepage_source" in quality_flags:
+        if not is_trusted_resolution_source(resolution_source):
+            penalty += 0.05
+    if "promo_event" in quality_flags:
+        penalty += 0.25
+    text = normalize_text(question_text)
+    if "retail_promo_event" in quality_flags:
+        penalty += 0.10
+        if "discount" in text or "%" in text:
+            penalty += 0.05
+        if "all purchases" in text:
+            penalty += 0.05
+    if "weather_event" in quality_flags:
+        penalty += 0.15
+    if "low_significance_event" in quality_flags:
+        penalty += 0.10
+    if "near_duplicate_theme" in quality_flags:
+        penalty += 0.10
+    return penalty
 
+
+# ---- Explanation generator ----
 
 def generate_score_explanation(
     market_interest_score: float,
@@ -387,19 +433,142 @@ def generate_score_explanation(
     )
 
 
-def score_questions(rows: list[dict], all_question_texts_by_id: list[tuple[int, str]]) -> list[ScoredCandidate]:
-    if not rows:
+# ---- Breakdown builder ----
+
+def _build_breakdown(
+    row: dict,
+    mention_velocity_score: float,
+    source_diversity_score: float,
+    clarity_score: float,
+    novelty_score: float,
+    market_interest_score: float,
+    resolution_strength_score: float,
+    time_horizon_score: float,
+    penalty: float,
+    final_score: float,
+) -> dict:
+    flags = set(row.get("quality_flags", []))
+    return {
+        "question_id": int(row["question_id"]),
+        "question_text": row.get("question_text", ""),
+        "rank": 0,
+        "total_score": final_score,
+        "component_scores": {
+            "clarity_score": clarity_score,
+            "mention_velocity_score": mention_velocity_score,
+            "source_diversity_score": source_diversity_score,
+            "novelty_score": novelty_score,
+            "market_interest_score": market_interest_score,
+            "resolution_strength_score": resolution_strength_score,
+            "time_horizon_score": time_horizon_score,
+        },
+        "quality_flags": {
+            "homepage_source": "homepage_source" in flags,
+            "promo_event": "promo_event" in flags,
+            "retail_promo_event": "retail_promo_event" in flags,
+            "low_significance_event": "low_significance_event" in flags,
+            "near_duplicate_theme": "near_duplicate_theme" in flags,
+            "weather_event": "weather_event" in flags,
+        },
+        "penalty_total": penalty,
+        "final_clamped_score": final_score,
+    }
+
+
+# ---- Core scoring engine ----
+
+def _score_single_row(
+    row: dict,
+    vel_min: float,
+    vel_max: float,
+    div_min: float,
+    div_max: float,
+    earlier_texts: list[str],
+) -> tuple[ScoredCandidate | None, dict | None]:
+    """Score a single row. Returns (ScoredCandidate, breakdown_dict) or (None, None) if excluded."""
+    question_id = int(row["question_id"])
+    q_text = row["question_text"]
+
+    # Hard exclusion: regulatory risk flags from FR5
+    validation_flags = row.get("validation_flags", [])
+    if _has_regulatory_hard_exclude(validation_flags):
+        logger.info(f"Q{question_id}: Hard-excluded due to regulatory flags: {validation_flags}")
+        return None, None
+
+    mention_velocity_score = normalize_minmax(float(row["mention_velocity"]), vel_min, vel_max)
+    source_diversity_score = normalize_minmax(float(row["source_diversity"]), div_min, div_max)
+    clarity_score = float(row["clarity_score"])
+    novelty = compute_novelty_score(q_text, earlier_texts)
+    market_interest = compute_market_interest_score(q_text, row.get("category", ""))
+    resolution_strength = compute_resolution_strength_score(row.get("resolution_source", ""))
+    time_horizon = compute_time_horizon_score(row.get("deadline", ""))
+
+    # Domain boosts
+    if _has_price_finance_terms(q_text):
+        mention_velocity_score = max(mention_velocity_score, 0.8)
+        resolution_strength = max(resolution_strength, 0.8)
+    if _is_major_sports_event(q_text):
+        mention_velocity_score = max(mention_velocity_score, 0.6)
+        resolution_strength = max(resolution_strength, 0.6)
+        market_interest = max(market_interest, 1.0)
+
+    base_score = (
+        0.20 * clarity_score
+        + 0.15 * mention_velocity_score
+        + 0.10 * source_diversity_score
+        + 0.10 * novelty
+        + 0.30 * market_interest
+        + 0.15 * resolution_strength
+        + 0.10 * time_horizon
+    )
+
+    if _is_ordinary_match_question(q_text) and not _is_major_sports_event(q_text):
+        base_score *= 0.85
+
+    # Soft penalties
+    penalty = _compute_soft_penalty(row["quality_flags"], q_text, row.get("resolution_source", ""))
+
+    # Regulatory soft penalty (minor involvement, excessive deadline)
+    penalty += _compute_regulatory_penalty(validation_flags)
+
+    total_score = max(0.0, min(1.0, base_score - penalty))
+
+    candidate = ScoredCandidate(
+        question_id=question_id,
+        total_score=total_score,
+        mention_velocity_score=mention_velocity_score,
+        source_diversity_score=source_diversity_score,
+        clarity_score=clarity_score,
+        novelty_score=novelty,
+    )
+
+    breakdown = _build_breakdown(
+        row=row,
+        mention_velocity_score=mention_velocity_score,
+        source_diversity_score=source_diversity_score,
+        clarity_score=clarity_score,
+        novelty_score=novelty,
+        market_interest_score=market_interest,
+        resolution_strength_score=resolution_strength,
+        time_horizon_score=time_horizon,
+        penalty=penalty,
+        final_score=total_score,
+    )
+
+    return candidate, breakdown
+
+
+def _prepare_rows(rows: list[dict]) -> list[dict]:
+    """Filter media events, compute soft penalty flags, sort by question_id."""
+    filtered = [r for r in rows if not is_media_event(r["question_text"])]
+    if not filtered:
         return []
 
-    filtered_rows = [r for r in rows if not is_media_event(r["question_text"])]
-    if not filtered_rows:
-        return []
-
-    filtered_rows.sort(key=lambda r: int(r["question_id"]))
+    filtered.sort(key=lambda r: int(r["question_id"]))
 
     prior_kept_texts: list[str] = []
-    kept_rows: list[dict] = []
-    for row in filtered_rows:
+    prepared: list[dict] = []
+    for row in filtered:
         row = dict(row)
         row["quality_flags"] = _soft_penalty_flags(
             question_text=row["question_text"],
@@ -407,88 +576,39 @@ def score_questions(rows: list[dict], all_question_texts_by_id: list[tuple[int, 
             resolution_source=row.get("resolution_source", ""),
             prior_kept_texts=prior_kept_texts,
         )
-        kept_rows.append(row)
+        prepared.append(row)
         prior_kept_texts.append(row["question_text"])
 
+    return prepared
+
+
+def score_questions(rows: list[dict], all_question_texts_by_id: list[tuple[int, str]]) -> list[ScoredCandidate]:
+    if not rows:
+        return []
+
+    kept_rows = _prepare_rows(rows)
     if not kept_rows:
         return []
 
     velocities = [float(r["mention_velocity"]) for r in kept_rows]
     diversities = [float(r["source_diversity"]) for r in kept_rows]
-
     vel_min, vel_max = min(velocities), max(velocities)
     div_min, div_max = min(diversities), max(diversities)
 
-    scored: list[ScoredCandidate] = []
     text_by_id = {qid: text for qid, text in all_question_texts_by_id}
+    scored: list[ScoredCandidate] = []
 
     for row in kept_rows:
         question_id = int(row["question_id"])
-        q_text = row["question_text"]
-
         earlier_texts = [
             text_by_id[qid]
             for qid, _ in all_question_texts_by_id
             if qid < question_id and qid in text_by_id
         ]
 
-        mention_velocity_score = normalize_minmax(float(row["mention_velocity"]), vel_min, vel_max)
-        source_diversity_score = normalize_minmax(float(row["source_diversity"]), div_min, div_max)
-        clarity_score = float(row["clarity_score"])
-        novelty_score = compute_novelty_score(q_text, earlier_texts)
-        market_interest_score = compute_market_interest_score(q_text, row.get("category", ""))
-        resolution_strength_score = compute_resolution_strength_score(row.get("resolution_source", ""))
-        time_horizon_score = compute_time_horizon_score(row.get("deadline", ""))
-        if _has_price_finance_terms(q_text):
-            mention_velocity_score = max(mention_velocity_score, 0.8)
-            resolution_strength_score = max(resolution_strength_score, 0.8)
-        if _is_major_sports_event(q_text):
-            mention_velocity_score = max(mention_velocity_score, 0.6)
-            resolution_strength_score = max(resolution_strength_score, 0.6)
-            market_interest_score = max(market_interest_score, 1.0)
-
-        base_score = (
-            0.20 * clarity_score
-            + 0.15 * mention_velocity_score
-            + 0.10 * source_diversity_score
-            + 0.10 * novelty_score
-            + 0.30 * market_interest_score
-            + 0.15 * resolution_strength_score
-            + 0.10 * time_horizon_score
-        )
-        if _is_ordinary_match_question(q_text) and not _is_major_sports_event(q_text):
-            base_score *= 0.85
-        penalty = 0.0
-        if "homepage_source" in row["quality_flags"]:
-            if not is_trusted_resolution_source(row.get("resolution_source", "")):
-                penalty += 0.05
-        if "promo_event" in row["quality_flags"]:
-            penalty += 0.25
-        text = normalize_text(q_text)
-        if "retail_promo_event" in row["quality_flags"]:
-            penalty += 0.10
-            if "discount" in text or "%" in text:
-                penalty += 0.05
-            if "all purchases" in text:
-                penalty += 0.05
-        if "weather_event" in row["quality_flags"]:
-            penalty += 0.15
-        if "low_significance_event" in row["quality_flags"]:
-            penalty += 0.10
-        if "near_duplicate_theme" in row["quality_flags"]:
-            penalty += 0.10
-        total_score = max(0.0, min(1.0, base_score - penalty))
-
-        scored.append(
-            ScoredCandidate(
-                question_id=question_id,
-                total_score=total_score,
-                mention_velocity_score=mention_velocity_score,
-                source_diversity_score=source_diversity_score,
-                clarity_score=clarity_score,
-                novelty_score=novelty_score,
-            )
-        )
+        candidate, _ = _score_single_row(row, vel_min, vel_max, div_min, div_max, earlier_texts)
+        if candidate:
+            scored.append(candidate)
 
     scored.sort(key=lambda x: (-x.total_score, x.question_id))
     for rank, candidate in enumerate(scored, start=1):
@@ -504,25 +624,7 @@ def score_questions_with_breakdown(
     if not rows:
         return [], {}
 
-    filtered_rows = [r for r in rows if not is_media_event(r["question_text"])]
-    if not filtered_rows:
-        return [], {}
-
-    filtered_rows.sort(key=lambda r: int(r["question_id"]))
-
-    prior_kept_texts: list[str] = []
-    kept_rows: list[dict] = []
-    for row in filtered_rows:
-        row = dict(row)
-        row["quality_flags"] = _soft_penalty_flags(
-            question_text=row["question_text"],
-            category=row.get("category", ""),
-            resolution_source=row.get("resolution_source", ""),
-            prior_kept_texts=prior_kept_texts,
-        )
-        kept_rows.append(row)
-        prior_kept_texts.append(row["question_text"])
-
+    kept_rows = _prepare_rows(rows)
     if not kept_rows:
         return [], {}
 
@@ -531,93 +633,28 @@ def score_questions_with_breakdown(
     vel_min, vel_max = min(velocities), max(velocities)
     div_min, div_max = min(diversities), max(diversities)
 
+    text_by_id = {qid: text for qid, text in all_question_texts_by_id}
     scored: list[ScoredCandidate] = []
     breakdowns: dict[int, dict] = {}
-    text_by_id = {qid: text for qid, text in all_question_texts_by_id}
 
     for row in kept_rows:
         question_id = int(row["question_id"])
-        q_text = row["question_text"]
         earlier_texts = [
             text_by_id[qid]
             for qid, _ in all_question_texts_by_id
             if qid < question_id and qid in text_by_id
         ]
-        mention_velocity_score = normalize_minmax(float(row["mention_velocity"]), vel_min, vel_max)
-        source_diversity_score = normalize_minmax(float(row["source_diversity"]), div_min, div_max)
-        clarity_score = float(row["clarity_score"])
-        novelty_score = compute_novelty_score(q_text, earlier_texts)
-        market_interest_score = compute_market_interest_score(q_text, row.get("category", ""))
-        resolution_strength_score = compute_resolution_strength_score(row.get("resolution_source", ""))
-        time_horizon_score = compute_time_horizon_score(row.get("deadline", ""))
-        if _has_price_finance_terms(q_text):
-            mention_velocity_score = max(mention_velocity_score, 0.8)
-            resolution_strength_score = max(resolution_strength_score, 0.8)
-        if _is_major_sports_event(q_text):
-            mention_velocity_score = max(mention_velocity_score, 0.6)
-            resolution_strength_score = max(resolution_strength_score, 0.6)
-            market_interest_score = max(market_interest_score, 1.0)
 
-        base_score = (
-            0.20 * clarity_score
-            + 0.15 * mention_velocity_score
-            + 0.10 * source_diversity_score
-            + 0.10 * novelty_score
-            + 0.30 * market_interest_score
-            + 0.15 * resolution_strength_score
-            + 0.10 * time_horizon_score
-        )
-        if _is_ordinary_match_question(q_text) and not _is_major_sports_event(q_text):
-            base_score *= 0.85
-        penalty = 0.0
-        if "homepage_source" in row["quality_flags"]:
-            if not is_trusted_resolution_source(row.get("resolution_source", "")):
-                penalty += 0.05
-        if "promo_event" in row["quality_flags"]:
-            penalty += 0.25
-        text = normalize_text(q_text)
-        if "retail_promo_event" in row["quality_flags"]:
-            penalty += 0.10
-            if "discount" in text or "%" in text:
-                penalty += 0.05
-            if "all purchases" in text:
-                penalty += 0.05
-        if "weather_event" in row["quality_flags"]:
-            penalty += 0.15
-        if "low_significance_event" in row["quality_flags"]:
-            penalty += 0.10
-        if "near_duplicate_theme" in row["quality_flags"]:
-            penalty += 0.10
-        total_score = max(0.0, min(1.0, base_score - penalty))
-
-        scored.append(
-            ScoredCandidate(
-                question_id=question_id,
-                total_score=total_score,
-                mention_velocity_score=mention_velocity_score,
-                source_diversity_score=source_diversity_score,
-                clarity_score=clarity_score,
-                novelty_score=novelty_score,
+        candidate, breakdown = _score_single_row(row, vel_min, vel_max, div_min, div_max, earlier_texts)
+        if candidate and breakdown:
+            scored.append(candidate)
+            breakdowns[question_id] = breakdown
+            breakdowns[question_id]["explanation"] = generate_score_explanation(
+                market_interest_score=breakdown["component_scores"]["market_interest_score"],
+                resolution_strength_score=breakdown["component_scores"]["resolution_strength_score"],
+                time_horizon_score=breakdown["component_scores"]["time_horizon_score"],
+                quality_flags=row["quality_flags"],
             )
-        )
-        breakdowns[question_id] = _build_breakdown(
-            row=row,
-            mention_velocity_score=mention_velocity_score,
-            source_diversity_score=source_diversity_score,
-            clarity_score=clarity_score,
-            novelty_score=novelty_score,
-            market_interest_score=market_interest_score,
-            resolution_strength_score=resolution_strength_score,
-            time_horizon_score=time_horizon_score,
-            penalty=penalty,
-            final_score=total_score,
-        )
-        breakdowns[question_id]["explanation"] = generate_score_explanation(
-            market_interest_score=market_interest_score,
-            resolution_strength_score=resolution_strength_score,
-            time_horizon_score=time_horizon_score,
-            quality_flags=row["quality_flags"],
-        )
 
     scored.sort(key=lambda x: (-x.total_score, x.question_id))
     for rank, candidate in enumerate(scored, start=1):
@@ -653,4 +690,3 @@ def top_n_ranked_display_rows(scored_rows: list[dict], top_n: int = 10) -> list[
         }
         for r in sliced
     ]
-
