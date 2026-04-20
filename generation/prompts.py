@@ -140,6 +140,31 @@ Example 4 — Binary, Geopolitics (novel/underserved domain):
   "rationale": "Geopolitical security markets are underserved on major platforms; outcome is binary and resolvable from two authoritative official government sources with no subjective interpretation required."
 }
 
+=== QUALITY ASSESSMENT (required for every question) ===
+After writing each question, you must self-evaluate four quality fields. Be honest — questions that score poorly will be filtered out, but a truthful low score is better than a falsely high one that creates an unresolvable market.
+
+1. resolution_confidence (0.0–1.0): Can the outcome be cleanly confirmed from the stated resolution_source?
+   - 1.0 → Source publishes a definitive, unambiguous result on a known schedule (Fed rate decision, FDA approval database, official election results)
+   - 0.7 → Authoritative but may require minor interpretation or slight delay
+   - 0.4 → Source may be delayed, inaccessible, or subject to dispute
+   - 0.0 → Source is controlled by an interested party, operates in a closed information environment, or outcome is likely to be suppressed or denied (e.g. Iran state media on their own leadership, a company claiming its own product is safe)
+
+2. resolution_confidence_reason: One sentence explaining the score above.
+
+3. source_independence (0.0–1.0): Is the resolution source independent of the parties being asked about?
+   - 1.0 → Fully independent: government statistical agency, stock exchange, treaty organization, international body
+   - 0.7 → Mostly independent: major newswire (Reuters, AP) with clear editorial standards
+   - 0.3 → Party reports its own result (company earnings report — acceptable but noted as a risk)
+   - 0.0 → The subject of the question is the only source and has a direct interest in the outcome
+
+4. timing_reliability (0.0–1.0): Will the resolution source definitely publish a result by the deadline?
+   - 1.0 → Fixed calendar date with no discretion: FOMC meeting, scheduled earnings release, election day
+   - 0.7 → Strong precedent for timely publication, minor delay risk
+   - 0.3 → Process can be indefinitely delayed: legislation, regulatory review, court cases
+   - 0.0 → No scheduled timeline; the outcome event itself may never formally occur
+
+5. already_resolved (boolean): Has this event already concluded as of today? Set true if the deadline has passed or the outcome is already publicly known — the question will be automatically rejected.
+
 === OUTPUT FORMAT ===
 Respond with ONLY a valid JSON object in this exact structure. No explanation, no commentary, no markdown fences:
 
@@ -153,8 +178,13 @@ Respond with ONLY a valid JSON object in this exact structure. No explanation, n
       "deadline": "<specific date tied to a real scheduled event, e.g. 'December 10, 2025'>",
       "deadline_source": "<official published schedule or calendar that establishes this deadline, with URL>",
       "resolution_source": "<specific authoritative organization and URL used to determine the outcome>",
-      "resolution_criteria": "<per-option resolution rules each explicitly naming the organization and URL>",
-      "rationale": "<1–2 sentences on why this makes a good prediction market>"
+      "resolution_criteria": "<per-option resolution rules in plain language>",
+      "rationale": "<1–2 sentences on why this makes a good prediction market>",
+      "resolution_confidence": <0.0–1.0>,
+      "resolution_confidence_reason": "<one sentence explaining the score>",
+      "source_independence": <0.0–1.0>,
+      "timing_reliability": <0.0–1.0>,
+      "already_resolved": <true|false>
     }
   ]
 }"""
@@ -165,21 +195,62 @@ def build_generation_user_prompt(
     entities: list,
     time_horizon: str,
     resolution_hints: list,
+    event_type: str = "",
+    outcome_variable: str = "",
+    candidate_deadlines: list = None,
+    resolution_sources: list = None,
+    market_angle: str = "",
+    confidence: float = 0.5,
+    contradiction_flag: bool = False,
+    contradiction_details: str = "",
 ) -> str:
     """
     Build the user prompt from a structured ExtractedEvent.
+
+    Uses all available FR3 fields to give the LLM maximum context for
+    generating precise, well-sourced questions.
 
     Args:
         event_summary: One-paragraph description of the core event.
         entities: Key people, organizations, or countries involved.
         time_horizon: Expected timeframe for resolution (from FR3).
         resolution_hints: Possible observable resolution criteria (from FR3).
+        event_type: Event category from FR3 (election, earnings, policy, etc.).
+        outcome_variable: Specific measurable variable (e.g. "CPI value", "bill passage").
+        candidate_deadlines: Possible deadline dates/windows from FR3.
+        resolution_sources: Authoritative sources from FR3 (e.g. "BLS CPI release").
+        market_angle: Why this event could become a prediction market (from FR3).
+        confidence: FR3 extraction confidence (0.0–1.0).
+        contradiction_flag: Whether FR3 flagged conflicting signals in the cluster.
+        contradiction_details: Description of contradictions if any.
 
     Returns:
         Formatted user prompt string.
     """
+    candidate_deadlines = candidate_deadlines or []
+    resolution_sources = resolution_sources or []
+
     entities_str = ", ".join(entities) if entities else "Not specified"
     hints_str = "\n".join(f"- {h}" for h in resolution_hints) if resolution_hints else "- Not specified"
+
+    # Build rich context block from FR3 fields
+    context_lines = []
+    if event_type:
+        context_lines.append(f"Event type: {event_type}")
+    if outcome_variable:
+        context_lines.append(f"Outcome variable: {outcome_variable}")
+    if candidate_deadlines:
+        context_lines.append(f"Candidate deadlines: {', '.join(candidate_deadlines)}")
+    if resolution_sources:
+        context_lines.append(f"Authoritative resolution sources (from FR3): {', '.join(resolution_sources)}")
+    if market_angle:
+        context_lines.append(f"Market angle: {market_angle}")
+    if confidence < 0.5:
+        context_lines.append(f"Note: FR3 extraction confidence was low ({confidence:.2f}) — apply extra scrutiny")
+    if contradiction_flag:
+        context_lines.append(f"Note: FR3 detected conflicting signals in source cluster — {contradiction_details}")
+
+    context_block = "\n".join(context_lines) if context_lines else "Not available"
 
     return f"""Generate 3 to 5 high-quality prediction market questions for the following event. Each question must be independently tradeable and meet all quality standards described in your instructions.
 
@@ -192,10 +263,15 @@ KEY ENTITIES:
 EXPECTED TIME HORIZON:
 {time_horizon}
 
+FR3 STRUCTURED CONTEXT (use these fields to craft precise, well-sourced questions):
+{context_block}
+
 RESOLUTION HINTS (observable outcomes that could resolve this event):
 {hints_str}
 
 Requirements:
+- Use the FR3 authoritative resolution sources above as your starting point for resolution_source fields where applicable
+- Use the candidate deadlines above as anchors for deadline fields — cross-reference with official published schedules
 - Cover different aspects of this event (outcome, timing, magnitude, actor, etc.)
 - Include at least one binary (Yes/No) and one multiple_choice question if the event supports it
 - Vary the time horizon across questions where possible

@@ -4,13 +4,12 @@ Pipeline Orchestrator
 Runs the prediction market pipeline as a sequence of composable stages.
 Each stage reads from the database and writes results back.
 
-To add new stages (FR4-FR7), append to the STAGES list:
-    STAGES.append(("FR4: Question Generation", run_question_gen))
-
 Usage:
     python pipeline.py              # run all stages
     python pipeline.py --stage 1    # run only FR1
     python pipeline.py --stage 1-2  # run FR1 and FR2
+    python pipeline.py --stage 4    # run FR4 only
+    python pipeline.py --stage 1-4  # run full pipeline
 """
 
 import argparse
@@ -24,15 +23,30 @@ from db.connection import (
     init_db, get_all_events, insert_cluster,
     get_clusters_for_extraction, insert_extracted_event,
     get_extracted_events_for_generation, insert_candidate_question,
+    get_candidate_questions_for_validation, insert_validation_result,
+    get_validated_questions_for_scoring, insert_scored_candidate,
+    get_all_candidate_question_texts,
 )
 from ingestion.rss_ingest import RSSIngestor
 from ingestion.gdelt_ingest import GDELTIngestor
 from ingestion.market_ingest import MarketIngestor
+from ingestion.reddit_ingest import RedditIngestor
+from ingestion.hn_ingest import HackerNewsIngestor
+from ingestion.wikipedia_ingest import WikipediaIngestor
+from ingestion.federal_register_ingest import FederalRegisterIngestor
+from ingestion.congress_ingest import CongressIngestor
+from ingestion.sec_ingest import SECIngestor
+from ingestion.bls_ingest import BLSIngestor
+from ingestion.fred_ingest import FREDIngestor
+from ingestion.eia_ingest import EIAIngestor
+from ingestion.kalshi_ingest import KalshiIngestor
 from clustering.embedder import Embedder
 from clustering.cluster import ClusterEngine
-from clustering.features import build_clusters
+from clustering.features import build_clusters, deduplicate_near_duplicates
 from extraction.extractor import EventExtractor
 from generation.generator import QuestionGenerator
+from validation.validator import validate_question
+from scoring.scorer import score_questions_with_breakdown
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +55,37 @@ logger = logging.getLogger(__name__)
 
 def run_ingestion():
     """FR1: Run all configured ingestors."""
-    ingestors = [RSSIngestor(), GDELTIngestor(), MarketIngestor()]
+    ingestors = [
+        # News / discovery sources
+        RSSIngestor(),
+        GDELTIngestor(),
+        # Social / attention sources
+        RedditIngestor(),
+        HackerNewsIngestor(),
+        WikipediaIngestor(),
+        # Official / resolution sources
+        FederalRegisterIngestor(),
+        CongressIngestor(),
+        SECIngestor(),
+        BLSIngestor(),
+        FREDIngestor(),
+        EIAIngestor(),
+        # Market / benchmark sources
+        MarketIngestor(),
+        KalshiIngestor(),
+    ]
     total_new = 0
     for ingestor in ingestors:
-        total_new += ingestor.ingest()
+        try:
+            new = ingestor.ingest()
+            total_new += new
+        except Exception as e:
+            logger.warning(f"Ingestor {ingestor.__class__.__name__} failed: {e}")
     logger.info(f"FR1 complete: {total_new} new events ingested")
 
 
 def run_clustering():
-    """FR2: Embed events and cluster them."""
+    """FR2: Embed events, deduplicate near-duplicates, and cluster."""
     events = get_all_events()
     if not events:
         logger.warning("FR2: No events to cluster")
@@ -59,6 +95,10 @@ def run_clustering():
     embedder = Embedder()
     texts = [e.content for e in events]
     embeddings = embedder.embed(texts)
+
+    # Deduplicate near-duplicates before clustering
+    events, embeddings = deduplicate_near_duplicates(events, embeddings)
+    logger.info(f"FR2: {len(events)} events after near-duplicate removal")
 
     # Cluster
     engine = ClusterEngine()
@@ -76,7 +116,7 @@ def run_clustering():
 
 
 def run_extraction():
-    """FR3: Extract structured events from clusters using LLM."""
+    """FR3: Extract structured, market-ready event specs from clusters using LLM."""
     clusters = get_clusters_for_extraction()
     if not clusters:
         logger.warning("FR3: No clusters to extract (all already processed or none exist)")
@@ -104,20 +144,53 @@ def run_question_generation():
 
     for q in questions:
         q_id = insert_candidate_question(q)
-        logger.info(f"Saved candidate question {q_id}: {q.question_text[:60]}...")
+        logger.info(f"Saved candidate question {q_id}: {q.question_text[:80]}...")
 
     logger.info(f"FR4 complete: {len(questions)} candidate questions generated from {len(events)} events")
 
 
+def run_validation():
+    """FR5: Run deterministic rule validation on candidate questions."""
+    questions = get_candidate_questions_for_validation()
+    if not questions:
+        logger.warning("FR5: No candidate questions to validate (all already processed or none exist)")
+        return
+
+    for q in questions:
+        result = validate_question(q)
+        insert_validation_result(result)
+        logger.debug(
+            f"Validated question {q.id}: is_valid={result.is_valid}, "
+            f"flags={len(result.flags)}, clarity={result.clarity_score:.2f}"
+        )
+
+    logger.info(f"FR5 complete: {len(questions)} questions validated")
+
+
+def run_scoring():
+    """FR6: Score validated candidate questions with deterministic heuristics."""
+    rows = get_validated_questions_for_scoring()
+    if not rows:
+        logger.warning("FR6: No validated questions to score (all already processed or none exist)")
+        return
+
+    all_question_texts_by_id = get_all_candidate_question_texts()
+    scored_candidates, _ = score_questions_with_breakdown(rows, all_question_texts_by_id)
+
+    for scored in scored_candidates:
+        insert_scored_candidate(scored)
+
+    logger.info(f"FR6 complete: {len(scored_candidates)} questions scored and ranked")
+
+
 # ---- Stage registry ----
-# Teammates: append your stages here
 STAGES: List[Tuple[str, Callable]] = [
     ("FR1: Event Ingestion", run_ingestion),
     ("FR2: Event Clustering", run_clustering),
     ("FR3: LLM Extraction", run_extraction),
     ("FR4: Question Generation", run_question_generation),
-    # ("FR5: Rule Validation", run_validation),
-    # ("FR6: Heuristic Scoring", run_scoring),
+    ("FR5: Rule Validation", run_validation),
+    ("FR6: Heuristic Scoring", run_scoring),
 ]
 
 
@@ -170,7 +243,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the prediction market pipeline")
     parser.add_argument(
         "--stage", type=str, default=None,
-        help="Stage range to run, e.g. '1', '1-2', '2-3'. Default: run all."
+        help="Stage range to run, e.g. '1', '1-2', '2-3', '1-4'. Default: run all."
     )
     args = parser.parse_args()
 

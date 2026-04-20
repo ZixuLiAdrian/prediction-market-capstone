@@ -50,3 +50,21 @@ def test_event_default_hash():
     """Event should have empty content_hash by default."""
     event = Event(content="test", source="s", source_type="rss")
     assert event.content_hash == ""
+
+
+def test_event_signal_role_default():
+    """Event should have 'discovery' as default signal_role."""
+    event = Event(content="test", source="s", source_type="rss")
+    assert event.signal_role == "discovery"
+
+
+def test_event_signal_role_custom():
+    """Event should accept custom signal_role."""
+    event = Event(content="test", source="sec_edgar", source_type="official", signal_role="resolution")
+    assert event.signal_role == "resolution"
+
+    event2 = Event(content="test", source="reddit", source_type="social", signal_role="attention")
+    assert event2.signal_role == "attention"
+
+    event3 = Event(content="test", source="polymarket", source_type="market", signal_role="benchmark")
+    assert event3.signal_role == "benchmark"

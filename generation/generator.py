@@ -98,6 +98,24 @@ def _validate_question(raw: dict) -> Optional[str]:
     res_source = raw.get("resolution_source", "")
     res_criteria = raw.get("resolution_criteria", "")
 
+    # Auto-reject already-resolved events
+    if raw.get("already_resolved", False):
+        return "already_resolved: event has already concluded"
+
+    # Quality score gates
+    res_conf = raw.get("resolution_confidence", 0.0)
+    if res_conf < 0.65:
+        reason = raw.get("resolution_confidence_reason", "no reason given")
+        return f"resolution_confidence too low ({res_conf:.2f}): {reason}"
+
+    src_ind = raw.get("source_independence", 0.0)
+    if src_ind < 0.4:
+        return f"source_independence too low ({src_ind:.2f}): resolution source has conflict of interest"
+
+    timing = raw.get("timing_reliability", 0.0)
+    if timing < 0.4:
+        return f"timing_reliability too low ({timing:.2f}): resolution may never be published by deadline"
+
     # Must end with a question mark
     if not qt.strip().endswith("?"):
         return f"question_text does not end with '?': {qt[:60]}"
@@ -171,11 +189,27 @@ class QuestionGenerator:
             logger.warning("ExtractedEvent has no DB id — skipping")
             return []
 
+        # Skip events FR3 marked as unsuitable for markets
+        if extracted_event.tradability == "unsuitable":
+            logger.info(
+                f"ExtractedEvent {extracted_event.id}: skipped (FR3 marked unsuitable"
+                f" — {extracted_event.rejection_reason})"
+            )
+            return []
+
         user_prompt = build_generation_user_prompt(
             event_summary=extracted_event.event_summary,
             entities=extracted_event.entities,
             time_horizon=extracted_event.time_horizon,
             resolution_hints=extracted_event.resolution_hints,
+            event_type=extracted_event.event_type,
+            outcome_variable=extracted_event.outcome_variable,
+            candidate_deadlines=extracted_event.candidate_deadlines,
+            resolution_sources=extracted_event.resolution_sources,
+            market_angle=extracted_event.market_angle,
+            confidence=extracted_event.confidence,
+            contradiction_flag=extracted_event.contradiction_flag,
+            contradiction_details=extracted_event.contradiction_details,
         )
 
         try:
@@ -265,6 +299,11 @@ class QuestionGenerator:
                 resolution_source=raw["resolution_source"].strip(),
                 resolution_criteria=raw["resolution_criteria"].strip(),
                 rationale=raw["rationale"].strip(),
+                resolution_confidence=raw.get("resolution_confidence", 0.0),
+                resolution_confidence_reason=raw.get("resolution_confidence_reason", "").strip(),
+                source_independence=raw.get("source_independence", 0.0),
+                timing_reliability=raw.get("timing_reliability", 0.0),
+                already_resolved=raw.get("already_resolved", False),
                 raw_llm_response=str(raw),
             )
             validated.append(question)
