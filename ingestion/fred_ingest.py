@@ -7,7 +7,7 @@ Covers macro/rates/economic time series.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -65,7 +65,7 @@ class FREDIngestor(BaseIngestor):
                 content = f"FRED {series_name}: {value} (as of {date})"
                 title = f"{series_name} — {date}"
 
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if date:
                     try:
                         timestamp = datetime.strptime(date, "%Y-%m-%d")

@@ -59,6 +59,11 @@ def valid_binary_question():
             "Resolves NO if the rate is held steady or increased."
         ),
         "rationale": "Clear binary outcome with an authoritative official source and a specific deadline.",
+        "resolution_confidence": 0.85,
+        "resolution_confidence_reason": "Official FOMC statement with clear rate decision",
+        "source_independence": 0.9,
+        "timing_reliability": 0.8,
+        "already_resolved": False,
     }
 
 
@@ -79,6 +84,11 @@ def valid_mc_question():
             "Resolves to 'More than 50 bps cut' if the rate is reduced by more than 50 basis points."
         ),
         "rationale": "Four exhaustive options covering all possible magnitude outcomes with explicit thresholds.",
+        "resolution_confidence": 0.85,
+        "resolution_confidence_reason": "Official FOMC statement with clear rate decision",
+        "source_independence": 0.9,
+        "timing_reliability": 0.8,
+        "already_resolved": False,
     }
 
 
@@ -383,6 +393,11 @@ class TestQuestionGenerator:
                         "Resolves NO if the rate is held or increased."
                     ),
                     "rationale": "Clear binary outcome from an official source.",
+                    "resolution_confidence": 0.85,
+                    "resolution_confidence_reason": "Official FOMC statement",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.8,
+                    "already_resolved": False,
                 }
             ]
         }
@@ -419,6 +434,11 @@ class TestQuestionGenerator:
                         "Resolves YES if any cut is announced. Resolves NO otherwise."
                     ),
                     "rationale": "Passes all checks.",
+                    "resolution_confidence": 0.85,
+                    "resolution_confidence_reason": "Official FOMC statement",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.8,
+                    "already_resolved": False,
                 },
                 {
                     # This question has a vague deadline and should be dropped
@@ -433,6 +453,11 @@ class TestQuestionGenerator:
                         "Resolves YES if something happens. Resolves NO otherwise."
                     ),
                     "rationale": "Has a vague deadline — should be rejected.",
+                    "resolution_confidence": 0.85,
+                    "resolution_confidence_reason": "Official source",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.8,
+                    "already_resolved": False,
                 },
             ]
         }

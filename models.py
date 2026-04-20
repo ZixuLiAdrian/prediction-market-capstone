@@ -10,7 +10,7 @@ These dataclasses define the contract between pipeline stages:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 
@@ -20,7 +20,7 @@ class Event:
     content: str
     source: str                           # e.g. "reuters", "gdelt", "polymarket", "reddit", "sec_edgar"
     source_type: str                      # "rss", "gdelt", "market", "social", "official"
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     url: str = ""
     title: str = ""
     entities: str = ""                    # comma-separated entity names

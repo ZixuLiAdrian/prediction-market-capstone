@@ -6,7 +6,7 @@ Requires REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -82,7 +82,7 @@ class RedditIngestor(BaseIngestor):
                         source="reddit",
                         source_type=self.source_type,
                         url=f"https://reddit.com{permalink}" if permalink else "",
-                        timestamp=datetime.utcfromtimestamp(created_utc) if created_utc else datetime.utcnow(),
+                        timestamp=datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else datetime.now(timezone.utc),
                         content_hash=compute_content_hash(content),
                         signal_role="attention",
                     ))

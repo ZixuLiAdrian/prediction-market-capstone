@@ -7,7 +7,7 @@ Provides a second benchmark market universe alongside Polymarket.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -52,7 +52,7 @@ class KalshiIngestor(BaseIngestor):
                 if category:
                     content += f" [Category: {category}]"
 
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if close_time:
                     try:
                         timestamp = datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)

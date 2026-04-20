@@ -270,17 +270,16 @@ def test_total_score_uses_exact_weighted_formula():
     by_id = {s.question_id: s for s in scored}
 
     s10 = by_id[10]
+    # New weights: market_interest 25%, resolution_strength 25%, clarity 20%,
+    # mention_velocity 10%, novelty 10%, time_horizon 5%, source_diversity 5%
     expected = (
-        0.20 * s10.clarity_score
-        + 0.15 * s10.mention_velocity_score
-        + 0.10 * s10.source_diversity_score
+        0.25 * s10.market_interest_score
+        + 0.25 * s10.resolution_strength_score
+        + 0.20 * s10.clarity_score
+        + 0.10 * s10.mention_velocity_score
         + 0.10 * s10.novelty_score
-        + 0.30 * compute_market_interest_score(rows[0]["question_text"], rows[0]["category"])
-        + 0.15 * max(
-            compute_resolution_strength_score(rows[0]["resolution_source"]),
-            0.8,
-        )
-        + 0.10 * compute_time_horizon_score(rows[0]["deadline"])
+        + 0.05 * s10.time_horizon_score
+        + 0.05 * s10.source_diversity_score
     )
     assert s10.total_score == expected
 

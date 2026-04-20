@@ -6,7 +6,7 @@ Good for tech, AI, startup, and security events.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -52,7 +52,7 @@ class HackerNewsIngestor(BaseIngestor):
                         source="hackernews",
                         source_type=self.source_type,
                         url=url,
-                        timestamp=datetime.utcfromtimestamp(created) if created else datetime.utcnow(),
+                        timestamp=datetime.fromtimestamp(created, tz=timezone.utc) if created else datetime.now(timezone.utc),
                         content_hash=compute_content_hash(content),
                         signal_role="attention",
                     ))

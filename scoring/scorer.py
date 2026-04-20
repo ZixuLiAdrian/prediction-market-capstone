@@ -2,13 +2,13 @@
 FR6: Deterministic heuristic scoring for validated questions.
 
 Scoring components (7 weighted factors):
+- market_interest_score (25%): topic-based interest heuristic
+- resolution_strength_score (25%): quality of resolution source (enriched with LLM scores)
 - clarity_score (20%): from FR5 validation
-- mention_velocity_score (15%): normalized cluster mention velocity
-- source_diversity_score (10%): normalized source diversity
+- mention_velocity_score (10%): normalized cluster mention velocity
 - novelty_score (10%): Jaccard distance from prior questions
-- market_interest_score (30%): topic-based interest heuristic
-- resolution_strength_score (15%): quality of resolution source
-- time_horizon_score (10%): deadline practicality
+- time_horizon_score (5%): deadline practicality (enriched with timing_reliability)
+- source_diversity_score (5%): normalized source diversity
 
 Penalties: promo events, weather, homepage sources, near-duplicates,
 low-significance, regulatory risk (prohibited topics, manipulation risk).

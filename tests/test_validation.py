@@ -33,6 +33,11 @@ def _base_question(**overrides):
         "resolution_source": "Federal Reserve statement at https://federalreserve.gov/monetarypolicy",
         "resolution_criteria": "Resolves YES if the federal funds target range is reduced by any amount. Resolves NO if held steady or increased.",
         "rationale": "Clear and measurable outcome from an authoritative source.",
+        "resolution_confidence": 0.9,
+        "resolution_confidence_reason": "Official Fed statement with clear rate decision",
+        "source_independence": 0.8,
+        "timing_reliability": 0.8,
+        "already_resolved": False,
     }
     data.update(overrides)
     return CandidateQuestion(**data)
