@@ -29,26 +29,66 @@ class LLMConfig:
     TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
 
 
+_DEFAULT_RSS_FEEDS = ",".join([
+    # --- Major news outlets ---
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://feeds.reuters.com/reuters/topNews",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
+    "https://www.ft.com/?format=rss",
+    "https://feeds.skynews.com/feeds/rss/world.xml",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://feeds.npr.org/1004/rss.xml",
+    "https://rss.politico.com/politics-news.xml",
+    "https://feeds.feedburner.com/TheAtlantic",
+    "https://www.wired.com/feed/rss",
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://www.nature.com/nature.rss",
+    "https://rss.sciencedaily.com/all.xml",
+    "https://feeds.feedburner.com/SpaceflightNow",
+    # --- Reddit public RSS feeds (no API key needed) ---
+    "https://www.reddit.com/r/worldnews/new.rss",
+    "https://www.reddit.com/r/geopolitics/new.rss",
+    "https://www.reddit.com/r/science/new.rss",
+    "https://www.reddit.com/r/technology/new.rss",
+    "https://www.reddit.com/r/MachineLearning/new.rss",
+    "https://www.reddit.com/r/investing/new.rss",
+    "https://www.reddit.com/r/economics/new.rss",
+    "https://www.reddit.com/r/medicine/new.rss",
+    "https://www.reddit.com/r/Futurology/new.rss",
+    "https://www.reddit.com/r/space/new.rss",
+    "https://www.reddit.com/r/energy/new.rss",
+    "https://www.reddit.com/r/environment/new.rss",
+    "https://www.reddit.com/r/law/new.rss",
+    "https://www.reddit.com/r/business/new.rss",
+    "https://www.reddit.com/r/GlobalPowers/new.rss",
+])
+
+_DEFAULT_GDELT_QUERY = (
+    "election OR policy OR FDA OR merger OR acquisition OR "
+    "climate OR AI OR sanctions OR NATO OR treaty OR "
+    "IPO OR earnings OR trial OR space OR energy"
+)
+
+
 class IngestionConfig:
     RSS_FEEDS = [
         url.strip()
-        for url in os.getenv(
-            "RSS_FEEDS",
-            "https://feeds.bbci.co.uk/news/world/rss.xml"
-        ).split(",")
+        for url in os.getenv("RSS_FEEDS", _DEFAULT_RSS_FEEDS).split(",")
         if url.strip()
     ]
-    GDELT_QUERY = os.getenv("GDELT_QUERY", "prediction market OR election OR policy")
+    GDELT_QUERY = os.getenv("GDELT_QUERY", _DEFAULT_GDELT_QUERY)
     GDELT_MAX_RECORDS = int(os.getenv("GDELT_MAX_RECORDS", "100"))
 
-    # Reddit
+    # Reddit (API-based ingestor — requires credentials for higher rate limits)
     REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
     REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
     REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "prediction-market-pipeline/1.0")
     REDDIT_SUBREDDITS = [
         s.strip() for s in os.getenv(
             "REDDIT_SUBREDDITS",
-            "politics,worldnews,news,investing,CryptoCurrency,technology,Polymarket"
+            "politics,worldnews,news,investing,CryptoCurrency,technology,Polymarket,"
+            "geopolitics,science,MachineLearning,economics,medicine,Futurology,space,energy"
         ).split(",") if s.strip()
     ]
     REDDIT_POST_LIMIT = int(os.getenv("REDDIT_POST_LIMIT", "25"))
@@ -58,10 +98,7 @@ class IngestionConfig:
 
     # Wikipedia Pageviews
     WIKI_PAGES = [
-        p.strip() for p in os.getenv(
-            "WIKI_PAGES",
-            ""
-        ).split(",") if p.strip()
+        p.strip() for p in os.getenv("WIKI_PAGES", "").split(",") if p.strip()
     ]
     WIKI_PAGEVIEW_THRESHOLD = int(os.getenv("WIKI_PAGEVIEW_THRESHOLD", "10000"))
 

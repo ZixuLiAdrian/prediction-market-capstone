@@ -7,7 +7,7 @@ Great for policy/regulatory prediction markets with clean resolution paths.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -55,7 +55,7 @@ class FederalRegisterIngestor(BaseIngestor):
                 if agencies:
                     content += f" (Agencies: {', '.join(agencies)})"
 
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if pub_date:
                     try:
                         timestamp = datetime.strptime(pub_date, "%Y-%m-%d")

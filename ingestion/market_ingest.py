@@ -7,7 +7,7 @@ avoid generating duplicate questions and identify trending topics.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -49,9 +49,9 @@ class MarketIngestor(BaseIngestor):
                     try:
                         timestamp = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(tzinfo=None)
                     except ValueError:
-                        timestamp = datetime.utcnow()
+                        timestamp = datetime.now(timezone.utc)
                 else:
-                    timestamp = datetime.utcnow()
+                    timestamp = datetime.now(timezone.utc)
 
                 events.append(Event(
                     title=question,

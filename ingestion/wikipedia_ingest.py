@@ -6,7 +6,7 @@ Pages with pageview counts above a threshold are ingested as attention signals.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 import requests
@@ -27,7 +27,7 @@ class WikipediaIngestor(BaseIngestor):
         events = []
 
         # Fetch yesterday's top pageviews
-        yesterday = datetime.utcnow() - timedelta(days=1)
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
         date_str = yesterday.strftime("%Y/%m/%d")
 
         try:

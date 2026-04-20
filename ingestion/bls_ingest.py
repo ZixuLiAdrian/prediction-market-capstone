@@ -7,7 +7,7 @@ Tracks CPI, unemployment, payrolls, and other economic indicators.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -71,7 +71,7 @@ class BLSIngestor(BaseIngestor):
                     source="bls",
                     source_type=self.source_type,
                     url=f"https://data.bls.gov/timeseries/{series_id}",
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     content_hash=compute_content_hash(f"bls-{series_id}-{year}-{period}"),
                     signal_role="resolution",
                 ))

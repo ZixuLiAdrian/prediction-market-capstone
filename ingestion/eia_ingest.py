@@ -7,7 +7,7 @@ Covers oil, gas, electricity, inventories, and production data.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -60,7 +60,7 @@ class EIAIngestor(BaseIngestor):
                 content = f"EIA {series_name}: {value} (period: {period})"
                 title = f"{series_name} — {period}"
 
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if period:
                     try:
                         timestamp = datetime.strptime(period, "%Y-%m-%d")

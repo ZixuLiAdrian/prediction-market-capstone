@@ -5,11 +5,12 @@ These dataclasses define the contract between pipeline stages:
 - FR1 (Ingestion) produces Event objects
 - FR2 (Clustering) produces Cluster objects containing Events
 - FR3 (Extraction) produces ExtractedEvent objects from Clusters
-- FR4+ (downstream) consumes ExtractedEvent to generate questions, validate, score
+- FR4 (Question Generation) produces CandidateQuestion objects from ExtractedEvents
+- FR5+ (downstream) consumes CandidateQuestion to validate, score, publish
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 
@@ -17,9 +18,9 @@ from typing import List, Optional
 class Event:
     """A single ingested event/article from any data source."""
     content: str
-    source: str                           # e.g. "reuters", "gdelt", "polymarket"
+    source: str                           # e.g. "reuters", "gdelt", "polymarket", "reddit", "sec_edgar"
     source_type: str                      # "rss", "gdelt", "market", "social", "official"
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     url: str = ""
     title: str = ""
     entities: str = ""                    # comma-separated entity names
@@ -73,3 +74,68 @@ class ExtractedEvent:
     resolution_hints: List[str] = field(default_factory=list)  # kept for backward compat
     id: Optional[int] = None
     raw_llm_response: Optional[str] = None  # for debugging
+
+
+@dataclass
+class CandidateQuestion:
+    """
+    A prediction market question produced by FR4 (LLM Question Generation).
+
+    THIS IS THE HANDOFF CONTRACT FOR FR5:
+    Downstream modules (rule validation, scoring, publishing) consume this object.
+    """
+    extracted_event_id: int
+    question_text: str                     # the market question, ends with "?"
+    category: str                          # one of 13 categories (politics, finance, etc.)
+    question_type: str                     # "binary" or "multiple_choice"
+    options: List[str]                     # ["Yes", "No"] or 3-5 labelled options
+    deadline: str                          # ISO date string, e.g. "2025-09-30"
+    deadline_source: str                   # URL of official schedule confirming the deadline
+    resolution_source: str                 # authoritative org + URL for resolution
+    resolution_criteria: str               # plain-language logic for each option
+    rationale: str                         # why this question is interesting/novel
+    # ---- LLM quality self-assessment fields ----
+    resolution_confidence: float = 0.0    # 0–1: how cleanly outcome can be confirmed from source
+    resolution_confidence_reason: str = "" # one-sentence explanation of the score
+    source_independence: float = 0.0      # 0–1: how neutral/unbiased the resolution source is
+    timing_reliability: float = 0.0       # 0–1: how reliably source publishes by deadline
+    already_resolved: bool = False         # True if event already concluded (auto-rejected by FR4)
+    id: Optional[int] = None              # DB-assigned
+    raw_llm_response: Optional[str] = None  # full LLM response for debugging
+
+
+@dataclass
+class ValidationResult:
+    """
+    FR5 output for deterministic rule validation of a CandidateQuestion.
+
+    THIS IS THE HANDOFF CONTRACT FOR FR6:
+    Scoring consumes this object to weight valid vs invalid questions.
+    """
+    question_id: int
+    is_valid: bool
+    flags: List[str]                       # list of validation failure reasons
+    clarity_score: float                   # 1.0 - 0.2 * len(flags), clamped to [0, 1]
+    id: Optional[int] = None              # DB-assigned
+
+
+@dataclass
+class ScoredCandidate:
+    """
+    FR6 output for heuristic scoring and ranking of validated questions.
+
+    THIS IS THE HANDOFF CONTRACT FOR FR7:
+    The dashboard reads scored_candidates to surface the best questions.
+    """
+    question_id: int
+    total_score: float
+    mention_velocity_score: float
+    source_diversity_score: float
+    clarity_score: float
+    novelty_score: float
+    # ---- Component scores stored so FR7 can display truthful breakdowns ----
+    market_interest_score: float = 0.0
+    resolution_strength_score: float = 0.0
+    time_horizon_score: float = 0.0
+    rank: int = 0
+    id: Optional[int] = None              # DB-assigned

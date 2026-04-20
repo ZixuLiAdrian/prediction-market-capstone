@@ -8,7 +8,7 @@ Also includes near-duplicate detection to prevent inflated metrics.
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import numpy as np
@@ -23,16 +23,19 @@ def deduplicate_near_duplicates(
     events: List[Event],
     embeddings: Optional[np.ndarray] = None,
     threshold: float = None,
-) -> List[Event]:
+) -> tuple[List[Event], Optional[np.ndarray]]:
     """
     Remove near-duplicate events from a list using embedding similarity.
     Keeps the first occurrence. If no embeddings provided, returns events as-is.
+
+    Returns (deduped_events, deduped_embeddings). The embeddings array is
+    filtered with the same mask so indices stay aligned.
 
     This prevents syndicated headlines and copied market descriptions
     from inflating mention velocity and cluster size.
     """
     if embeddings is None or len(embeddings) == 0 or len(events) <= 1:
-        return events
+        return events, embeddings
 
     threshold = threshold or ClusteringConfig.NEAR_DUPLICATE_THRESHOLD
     keep_mask = [True] * len(events)
@@ -52,11 +55,13 @@ def deduplicate_near_duplicates(
             if sim >= threshold:
                 keep_mask[j] = False
 
+    mask_arr = np.array(keep_mask)
     deduped = [e for e, keep in zip(events, keep_mask) if keep]
+    deduped_emb = embeddings[mask_arr]
     removed = len(events) - len(deduped)
     if removed > 0:
         logger.debug(f"Near-dedup: removed {removed} near-duplicate events (threshold={threshold})")
-    return deduped
+    return deduped, deduped_emb
 
 
 def compute_cluster_coherence(embeddings: np.ndarray) -> float:
@@ -140,7 +145,7 @@ def compute_cluster_features(
     source_diversity = len(sources)
 
     # Recency: hours since most recent event
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     most_recent = max(timestamps)
     recency = (now - most_recent).total_seconds() / 3600
 

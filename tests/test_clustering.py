@@ -4,7 +4,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import numpy as np
 
 from clustering.cluster import ClusterEngine
@@ -20,7 +20,7 @@ from models import Event, ClusterFeatures
 
 def _make_events(n, source_prefix="src", hours_ago_start=0, signal_role="discovery"):
     """Helper to create test events."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return [
         Event(
             content=f"Event {i} about topic",
@@ -89,9 +89,9 @@ def test_compute_features_basic():
 def test_source_diversity_count():
     """Source diversity should count unique sources."""
     events = [
-        Event(content="a", source="reuters", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="b", source="bbc", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="c", source="reuters", source_type="rss", timestamp=datetime.utcnow()),
+        Event(content="a", source="reuters", source_type="rss", timestamp=datetime.now(timezone.utc)),
+        Event(content="b", source="bbc", source_type="rss", timestamp=datetime.now(timezone.utc)),
+        Event(content="c", source="reuters", source_type="rss", timestamp=datetime.now(timezone.utc)),
     ]
     features = compute_cluster_features(events)
     assert features.source_diversity == 2  # reuters and bbc
@@ -111,10 +111,10 @@ def test_empty_events_features():
 def test_source_role_mix():
     """Source role mix should count events by signal_role."""
     events = [
-        Event(content="a", source="reuters", source_type="rss", signal_role="discovery", timestamp=datetime.utcnow()),
-        Event(content="b", source="reddit", source_type="social", signal_role="attention", timestamp=datetime.utcnow()),
-        Event(content="c", source="bbc", source_type="rss", signal_role="discovery", timestamp=datetime.utcnow()),
-        Event(content="d", source="sec", source_type="official", signal_role="resolution", timestamp=datetime.utcnow()),
+        Event(content="a", source="reuters", source_type="rss", signal_role="discovery", timestamp=datetime.now(timezone.utc)),
+        Event(content="b", source="reddit", source_type="social", signal_role="attention", timestamp=datetime.now(timezone.utc)),
+        Event(content="c", source="bbc", source_type="rss", signal_role="discovery", timestamp=datetime.now(timezone.utc)),
+        Event(content="d", source="sec", source_type="official", signal_role="resolution", timestamp=datetime.now(timezone.utc)),
     ]
     mix = compute_source_role_mix(events)
     assert mix["discovery"] == 2
@@ -144,7 +144,7 @@ def test_coherence_score_empty():
 
 def test_weighted_mention_velocity():
     """Official sources should produce higher weighted velocity than social sources."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     official_events = [
         Event(content="a", source="federal_register", source_type="official", timestamp=now),
         Event(content="b", source="sec_edgar", source_type="official", timestamp=now - timedelta(hours=1)),
@@ -163,9 +163,9 @@ def test_weighted_mention_velocity():
 def test_near_duplicate_detection():
     """Near-identical embeddings should be deduplicated."""
     events = [
-        Event(content="Breaking: Fed cuts rates", source="reuters", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="Breaking: Fed cuts rates today", source="bbc", source_type="rss", timestamp=datetime.utcnow()),
-        Event(content="Completely different topic about sports", source="espn", source_type="rss", timestamp=datetime.utcnow()),
+        Event(content="Breaking: Fed cuts rates", source="reuters", source_type="rss", timestamp=datetime.now(timezone.utc)),
+        Event(content="Breaking: Fed cuts rates today", source="bbc", source_type="rss", timestamp=datetime.now(timezone.utc)),
+        Event(content="Completely different topic about sports", source="espn", source_type="rss", timestamp=datetime.now(timezone.utc)),
     ]
     # Make near-identical embeddings for first two, different for third
     embeddings = np.array([
@@ -174,15 +174,17 @@ def test_near_duplicate_detection():
         [0.0, 1.0, 0.0],      # very different
     ])
 
-    deduped = deduplicate_near_duplicates(events, embeddings, threshold=0.99)
+    deduped, deduped_emb = deduplicate_near_duplicates(events, embeddings, threshold=0.99)
     assert len(deduped) == 2  # first and third should remain
+    assert deduped_emb.shape[0] == 2  # embeddings filtered to match
 
 
 def test_near_duplicate_no_embeddings():
     """Without embeddings, should return events unchanged."""
     events = _make_events(5)
-    result = deduplicate_near_duplicates(events)
+    result, result_emb = deduplicate_near_duplicates(events)
     assert len(result) == 5
+    assert result_emb is None  # no embeddings provided
 
 
 def test_features_with_embeddings():

@@ -6,7 +6,7 @@ Requires a free API key from api.congress.gov.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -55,7 +55,7 @@ class CongressIngestor(BaseIngestor):
                 if action_text:
                     content += f". Latest action: {action_text}"
 
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 if action_date:
                     try:
                         timestamp = datetime.strptime(action_date, "%Y-%m-%d")

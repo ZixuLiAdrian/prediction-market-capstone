@@ -7,7 +7,7 @@ Focuses on 8-K (material events) and Form 4 (insider trading) by default.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -37,7 +37,7 @@ class SECIngestor(BaseIngestor):
                 params = {
                     "q": "*",
                     "dateRange": "custom",
-                    "startdt": datetime.utcnow().strftime("%Y-%m-%d"),
+                    "startdt": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     "forms": form_type,
                 }
 
@@ -62,7 +62,7 @@ class SECIngestor(BaseIngestor):
                     if summary:
                         content += f". {summary[:500]}"
 
-                    timestamp = datetime.utcnow()
+                    timestamp = datetime.now(timezone.utc)
                     if updated:
                         try:
                             timestamp = datetime.fromisoformat(updated.replace("Z", "+00:00")).replace(tzinfo=None)
