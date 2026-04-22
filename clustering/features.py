@@ -19,6 +19,16 @@ from config import ClusteringConfig
 logger = logging.getLogger(__name__)
 
 
+def _to_utc_naive(dt: datetime) -> datetime:
+    """
+    Normalize datetimes to naive UTC so values loaded from PostgreSQL
+    and values created in code can be compared safely.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def deduplicate_near_duplicates(
     events: List[Event],
     embeddings: Optional[np.ndarray] = None,
@@ -107,7 +117,7 @@ def compute_weighted_mention_velocity(events: List[Event]) -> float:
 
     total_weight = sum(weights.get(e.source, default_weight) for e in events)
 
-    timestamps = [e.timestamp for e in events]
+    timestamps = [_to_utc_naive(e.timestamp) for e in events]
     time_span = (max(timestamps) - min(timestamps)).total_seconds() / 3600
     if time_span < 0.01:
         return total_weight
@@ -131,7 +141,7 @@ def compute_cluster_features(
     if not events:
         return ClusterFeatures()
 
-    timestamps = [e.timestamp for e in events]
+    timestamps = [_to_utc_naive(e.timestamp) for e in events]
     sources = {e.source for e in events}
 
     # Mention velocity: events per hour
@@ -145,7 +155,7 @@ def compute_cluster_features(
     source_diversity = len(sources)
 
     # Recency: hours since most recent event
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     most_recent = max(timestamps)
     recency = (now - most_recent).total_seconds() / 3600
 

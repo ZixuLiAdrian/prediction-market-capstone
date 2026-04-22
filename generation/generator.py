@@ -14,14 +14,32 @@ FR5 (Rule Validation) consumes CandidateQuestion objects produced here.
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import List, Optional
 
+from config import LLMConfig
 from models import ExtractedEvent, CandidateQuestion
 from extraction.llm_client import LLMClient
-from generation.prompts import GENERATION_SYSTEM_PROMPT, build_generation_user_prompt
+from generation.prompts import (
+    GENERATION_SYSTEM_PROMPT,
+    REPAIR_SYSTEM_PROMPT,
+    build_generation_user_prompt,
+    build_repair_user_prompt,
+)
 from generation.schema import CANDIDATE_QUESTIONS_SCHEMA
+from ranking.story_dedupe import dedupe_questions
 
 logger = logging.getLogger(__name__)
+UTC = timezone.utc
+
+_DEADLINE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%B %d, %Y",
+    "%b %d, %Y",
+    "%d %B %Y",
+    "%d %b %Y",
+)
 
 # Words that must never appear in any generated question or option.
 # The LLM should never produce these, but this acts as a hard safety net.
@@ -82,6 +100,51 @@ def _normalize_binary_options(options: List[str]) -> List[str]:
         if lower[0] in no_variants and lower[1] in yes_variants:
             return ["Yes", "No"]
     return options
+
+
+def _try_parse_deadline(value: str) -> Optional[datetime]:
+    """Parse a deadline string into a naive datetime when possible."""
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    normalized = re.sub(r"^(by|before)\s+", "", text, flags=re.IGNORECASE).strip()
+    for fmt in _DEADLINE_FORMATS:
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_deadline(dt_value: datetime) -> str:
+    """Format a deadline consistently for downstream validation/UI."""
+    return f"{dt_value.strftime('%B')} {dt_value.day}, {dt_value.year}"
+
+
+def _repair_deadline_fields(raw: dict, extracted_event: ExtractedEvent) -> None:
+    """
+    Coerce stale or malformed deadlines toward future candidate deadlines from FR3.
+
+    This is a narrow salvage step: if FR4 picked a past date but FR3 supplied a
+    future candidate deadline, use that future anchor instead of discarding an
+    otherwise good question.
+    """
+    today = datetime.now(UTC).date()
+    parsed = _try_parse_deadline(raw.get("deadline", ""))
+    if parsed and parsed.date() > today:
+        raw["deadline"] = _format_deadline(parsed)
+        return
+
+    future_candidates: list[datetime] = []
+    for candidate in extracted_event.candidate_deadlines or []:
+        candidate_dt = _try_parse_deadline(candidate)
+        if candidate_dt and candidate_dt.date() > today:
+            future_candidates.append(candidate_dt)
+
+    if future_candidates:
+        best = min(future_candidates)
+        raw["deadline"] = _format_deadline(best)
 
 
 def _validate_question(raw: dict) -> Optional[str]:
@@ -166,11 +229,55 @@ def _validate_question(raw: dict) -> Optional[str]:
     return None  # passed all checks
 
 
+def _normalize_category(raw: dict, extracted_event: ExtractedEvent) -> str:
+    """
+    Keep FR4 categories aligned with the downstream schema and product intent.
+
+    The LLM sometimes drifts toward "other" or invalid election-like labels for
+    election events. Map those explicitly back to politics.
+    """
+    category = (raw.get("category") or "").strip().lower()
+    event_type = (extracted_event.event_type or "").strip().lower()
+
+    if event_type == "election" and category in {"", "other", "election"}:
+        return "politics"
+
+    return category or "other"
+
+
+def _is_sportsbook_style_question(question: CandidateQuestion) -> bool:
+    """
+    Suppress narrow sportsbook-style props that don't fit the broader product.
+
+    We keep sports questions, but bias away from exact-score markets, next-game
+    winner markets, and single-game player props.
+    """
+    if question.category != "sports":
+        return False
+
+    text = question.question_text.lower()
+
+    if "final score" in text:
+        return True
+    if "upcoming game" in text:
+        return True
+    if re.search(r"\bnext [a-z0-9' -]*game\b", text):
+        return True
+    if re.search(r"\bwin (their|the) next game\b", text):
+        return True
+    if re.search(r"\bscore at least \d+\b", text):
+        return True
+    if re.search(r"\b(points|rebounds|assists|goals|shots|threes)\b", text) and "next" in text and "game" in text:
+        return True
+
+    return False
+
+
 class QuestionGenerator:
     """Generates structured prediction market questions from ExtractedEvent objects."""
 
-    def __init__(self, llm_client: LLMClient = None):
-        self.llm_client = llm_client or LLMClient()
+    def __init__(self, llm_client: LLMClient = None, model: str = None):
+        self.llm_client = llm_client or LLMClient(model=model or LLMConfig.FR4_MODEL)
 
     def generate(
         self,
@@ -225,13 +332,66 @@ class QuestionGenerator:
             return []
 
         raw_questions = result.get("questions", [])
-        questions = self._validate_and_build(raw_questions, extracted_event.id)
+        questions = self._validate_and_build(raw_questions, extracted_event)
 
         logger.info(
             f"ExtractedEvent {extracted_event.id}: "
             f"{len(questions)}/{len(raw_questions)} questions passed validation"
         )
         return questions
+
+    def repair_question(
+        self,
+        extracted_event: ExtractedEvent,
+        failed_question: CandidateQuestion,
+        validation_flags: List[str],
+    ) -> Optional[CandidateQuestion]:
+        """
+        Repair a failed-but-salvageable question using the same FR4 schema.
+
+        Returns a single repaired CandidateQuestion or None if repair fails.
+        """
+        if not extracted_event.id:
+            return None
+
+        repair_prompt = build_repair_user_prompt(
+            original_question={
+                "question_text": failed_question.question_text,
+                "question_type": failed_question.question_type,
+                "options": failed_question.options,
+                "deadline": failed_question.deadline,
+                "deadline_source": failed_question.deadline_source,
+                "resolution_source": failed_question.resolution_source,
+                "resolution_criteria": failed_question.resolution_criteria,
+            },
+            validation_flags=validation_flags,
+            event_summary=extracted_event.event_summary,
+            entities=extracted_event.entities,
+            candidate_deadlines=extracted_event.candidate_deadlines,
+            resolution_sources=extracted_event.resolution_sources,
+            time_horizon=extracted_event.time_horizon,
+            market_angle=extracted_event.market_angle,
+        )
+
+        try:
+            result = self.llm_client.call(
+                system_prompt=REPAIR_SYSTEM_PROMPT,
+                user_prompt=repair_prompt,
+                response_schema=CANDIDATE_QUESTIONS_SCHEMA,
+            )
+        except RuntimeError as e:
+            logger.error(
+                f"Question repair failed for Q{failed_question.id or '?'} "
+                f"(ExtractedEvent {extracted_event.id}): {e}"
+            )
+            return None
+
+        repaired_questions = self._validate_and_build(
+            result.get("questions", []),
+            extracted_event,
+            repair_parent_question_id=failed_question.id,
+        )
+        return repaired_questions[0] if repaired_questions else None
 
     def generate_batch(
         self,
@@ -261,7 +421,8 @@ class QuestionGenerator:
     def _validate_and_build(
         self,
         raw_questions: list,
-        extracted_event_id: int,
+        extracted_event: ExtractedEvent,
+        repair_parent_question_id: int = None,
     ) -> List[CandidateQuestion]:
         """
         Apply post-schema quality checks and build CandidateQuestion objects.
@@ -275,7 +436,9 @@ class QuestionGenerator:
         """
         validated: List[CandidateQuestion] = []
 
+        extracted_event_id = extracted_event.id or 0
         for i, raw in enumerate(raw_questions):
+            _repair_deadline_fields(raw, extracted_event)
             error = _validate_question(raw)
             if error:
                 logger.warning(
@@ -291,7 +454,7 @@ class QuestionGenerator:
             question = CandidateQuestion(
                 extracted_event_id=extracted_event_id,
                 question_text=raw["question_text"].strip(),
-                category=raw["category"],
+                category=_normalize_category(raw, extracted_event),
                 question_type=raw["question_type"],
                 options=options,
                 deadline=raw["deadline"].strip(),
@@ -304,8 +467,22 @@ class QuestionGenerator:
                 source_independence=raw.get("source_independence", 0.0),
                 timing_reliability=raw.get("timing_reliability", 0.0),
                 already_resolved=raw.get("already_resolved", False),
+                repair_parent_question_id=repair_parent_question_id,
                 raw_llm_response=str(raw),
             )
+            if _is_sportsbook_style_question(question):
+                logger.info(
+                    f"ExtractedEvent {extracted_event_id}: "
+                    f"dropped sportsbook-style sports question: {question.question_text[:90]}"
+                )
+                continue
             validated.append(question)
 
-        return validated
+        deduped = dedupe_questions(validated)
+        if len(deduped) != len(validated):
+            logger.info(
+                f"ExtractedEvent {extracted_event_id}: "
+                f"dropped {len(validated) - len(deduped)} near-duplicate FR4 questions"
+            )
+
+        return deduped

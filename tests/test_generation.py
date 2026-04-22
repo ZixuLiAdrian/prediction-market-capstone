@@ -8,13 +8,17 @@ import json
 import jsonschema
 import pytest
 
+from config import LLMConfig
 from generation.schema import CANDIDATE_QUESTIONS_SCHEMA
 from generation.prompts import build_generation_user_prompt
 from generation.generator import (
     QuestionGenerator,
     _contains_blocked_content,
     _has_garbled_text,
+    _is_sportsbook_style_question,
+    _normalize_category,
     _normalize_binary_options,
+    _repair_deadline_fields,
     _validate_question,
 )
 from models import ExtractedEvent, CandidateQuestion
@@ -232,6 +236,28 @@ class TestPrompt:
         )
         assert "Not specified" in prompt
 
+    def test_prompt_adds_election_category_guidance(self):
+        prompt = build_generation_user_prompt(
+            event_summary="A parliamentary election is expected later this year.",
+            entities=["Bulgaria"],
+            time_horizon="by November 2026",
+            resolution_hints=["Official election schedule"],
+            event_type="election",
+        )
+        assert "Category guidance: use category 'politics' for election questions" in prompt
+        assert "prefer secretary of state, election commission, official filing pages, or certified results" in prompt
+
+    def test_prompt_adds_geopolitics_source_guidance(self):
+        prompt = build_generation_user_prompt(
+            event_summary="A ceasefire between two countries may collapse or be extended soon.",
+            entities=["Israel", "Lebanon"],
+            time_horizon="10 days",
+            resolution_hints=["Reuters/AP reporting plus official statements"],
+            event_type="geopolitics",
+        )
+        assert "use named high-credibility outlets plus official statements" in prompt
+        assert "prefer observable status/announcement questions over blame or compliance attribution" in prompt
+
 
 # =========================================================
 # Content safety tests
@@ -345,6 +371,67 @@ class TestValidateQuestion:
         bad = dict(valid_binary_question, options=["Yes", ""])
         assert _validate_question(bad) is not None
 
+    def test_past_deadline_can_be_repaired_from_future_candidate_deadline(self, sample_extracted_event, valid_binary_question):
+        sample_extracted_event.candidate_deadlines = ["April 22, 2027", "April 1, 2025"]
+        bad = dict(valid_binary_question, deadline="April 1, 2025")
+        _repair_deadline_fields(bad, sample_extracted_event)
+        assert bad["deadline"] == "April 22, 2027"
+
+
+class TestCategoryAndSportsNormalization:
+    def test_normalize_category_maps_election_to_politics(self):
+        extracted_event = ExtractedEvent(
+            id=1,
+            cluster_id=1,
+            event_summary="The 2026 Bulgarian parliamentary election is scheduled for later this year.",
+            entities=["Bulgaria"],
+            event_type="election",
+        )
+        raw = {"category": "other"}
+        assert _normalize_category(raw, extracted_event) == "politics"
+
+    def test_sportsbook_style_filter_flags_exact_score_and_next_game_props(self):
+        exact_score = CandidateQuestion(
+            extracted_event_id=1,
+            question_text="What will be the final score of the Los Angeles Dodgers game against the San Francisco Giants on April 28, 2026?",
+            category="sports",
+            question_type="multiple_choice",
+            options=["1-0", "2-1", "3-2"],
+            deadline="April 28, 2026",
+            deadline_source="MLB schedule at https://example.com/mlb",
+            resolution_source="MLB official box score at https://example.com/boxscore",
+            resolution_criteria="Resolves to the listed exact score.",
+            rationale="Test",
+        )
+        next_game_prop = CandidateQuestion(
+            extracted_event_id=1,
+            question_text="Will Jalen Brunson score at least 25 points in the next New York Knicks game?",
+            category="sports",
+            question_type="binary",
+            options=["Yes", "No"],
+            deadline="April 25, 2026",
+            deadline_source="NBA schedule at https://example.com/nba",
+            resolution_source="NBA official box score at https://example.com/boxscore",
+            resolution_criteria="Resolves YES if Brunson scores at least 25 points. Resolves NO otherwise.",
+            rationale="Test",
+        )
+        season_market = CandidateQuestion(
+            extracted_event_id=1,
+            question_text="Will the Los Angeles Dodgers win at least 90 games in the 2026 MLB season?",
+            category="sports",
+            question_type="binary",
+            options=["Yes", "No"],
+            deadline="September 30, 2026",
+            deadline_source="MLB season schedule at https://example.com/mlb",
+            resolution_source="MLB standings at https://example.com/standings",
+            resolution_criteria="Resolves YES if the Dodgers finish with at least 90 wins. Resolves NO otherwise.",
+            rationale="Test",
+        )
+
+        assert _is_sportsbook_style_question(exact_score) is True
+        assert _is_sportsbook_style_question(next_game_prop) is True
+        assert _is_sportsbook_style_question(season_market) is False
+
 
 # =========================================================
 # Generator unit tests (no LLM calls — mock the client)
@@ -361,6 +448,32 @@ class MockLLMClient:
 
 
 class TestQuestionGenerator:
+    def test_question_generator_uses_stage_specific_model_by_default(self, monkeypatch):
+        """QuestionGenerator should default to FR4_LLM_MODEL when creating its own client."""
+        captured = {}
+
+        class DummyLLMClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("generation.generator.LLMClient", DummyLLMClient)
+        QuestionGenerator()
+
+        assert captured["model"] == LLMConfig.FR4_MODEL
+
+    def test_question_generator_allows_model_override(self, monkeypatch):
+        """QuestionGenerator should allow an explicit FR4 model override."""
+        captured = {}
+
+        class DummyLLMClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("generation.generator.LLMClient", DummyLLMClient)
+        QuestionGenerator(model="custom-fr4-model")
+
+        assert captured["model"] == "custom-fr4-model"
+
     def test_generate_returns_candidate_questions(
         self, sample_extracted_event, valid_llm_response
     ):
@@ -466,6 +579,101 @@ class TestQuestionGenerator:
         assert len(results) == 1
         # The valid question (first one) should survive; the vague-deadline one is dropped
         assert "December 2025" in results[0].question_text
+
+    def test_generate_dedupes_near_duplicate_questions_within_one_event(self, sample_extracted_event):
+        response = {
+            "questions": [
+                {
+                    "question_text": "Will the ceasefire between Israel and Lebanon be extended beyond its initial term?",
+                    "category": "geopolitics",
+                    "question_type": "binary",
+                    "options": ["Yes", "No"],
+                    "deadline": "April 30, 2026",
+                    "deadline_source": "Official statement at https://example.com/ceasefire",
+                    "resolution_source": "Official source at https://example.com/source",
+                    "resolution_criteria": "Resolves YES if the ceasefire is formally extended. Resolves NO otherwise.",
+                    "rationale": "Ceasefire extension question.",
+                    "resolution_confidence": 0.85,
+                    "resolution_confidence_reason": "Official source",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.8,
+                    "already_resolved": False,
+                },
+                {
+                    "question_text": "Will the cease-fire be extended beyond its initial 10-day term?",
+                    "category": "geopolitics",
+                    "question_type": "binary",
+                    "options": ["Yes", "No"],
+                    "deadline": "April 30, 2026",
+                    "deadline_source": "Official statement at https://example.com/ceasefire",
+                    "resolution_source": "Official source at https://example.com/source",
+                    "resolution_criteria": "Resolves YES if the ceasefire is formally extended. Resolves NO otherwise.",
+                    "rationale": "Ceasefire extension variant.",
+                    "resolution_confidence": 0.85,
+                    "resolution_confidence_reason": "Official source",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.8,
+                    "already_resolved": False,
+                },
+            ]
+        }
+
+        generator = QuestionGenerator(llm_client=MockLLMClient(response))
+        results = generator.generate(sample_extracted_event)
+
+        assert len(results) == 1
+
+    def test_generate_filters_sportsbook_style_questions(self):
+        sports_event = ExtractedEvent(
+            id=99,
+            cluster_id=8,
+            event_summary="Upcoming Lakers and Dodgers games create immediate sports speculation.",
+            entities=["Los Angeles Lakers", "Denver Nuggets", "Los Angeles Dodgers"],
+            event_type="sports",
+            time_horizon="within 7 days",
+            resolution_hints=["Official league box score"],
+        )
+        response = {
+            "questions": [
+                {
+                    "question_text": "What will be the final score of the Los Angeles Dodgers game against the San Francisco Giants on April 28, 2026?",
+                    "category": "sports",
+                    "question_type": "multiple_choice",
+                    "options": ["1-0", "2-1", "3-2"],
+                    "deadline": "April 28, 2026",
+                    "deadline_source": "MLB schedule at https://example.com/mlb",
+                    "resolution_source": "MLB official box score at https://example.com/boxscore",
+                    "resolution_criteria": "Resolves to the listed exact score.",
+                    "rationale": "Test rationale.",
+                    "resolution_confidence": 0.9,
+                    "resolution_confidence_reason": "Official box score",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.9,
+                    "already_resolved": False,
+                },
+                {
+                    "question_text": "Will the Los Angeles Dodgers win at least 90 games in the 2026 MLB season?",
+                    "category": "sports",
+                    "question_type": "binary",
+                    "options": ["Yes", "No"],
+                    "deadline": "September 30, 2026",
+                    "deadline_source": "MLB season schedule at https://example.com/mlb",
+                    "resolution_source": "MLB standings at https://example.com/standings",
+                    "resolution_criteria": "Resolves YES if the Dodgers finish with at least 90 wins. Resolves NO otherwise.",
+                    "rationale": "Season-long sports market.",
+                    "resolution_confidence": 0.9,
+                    "resolution_confidence_reason": "Official standings",
+                    "source_independence": 0.9,
+                    "timing_reliability": 0.9,
+                    "already_resolved": False,
+                },
+            ]
+        }
+        generator = QuestionGenerator(llm_client=MockLLMClient(response))
+        results = generator.generate(sports_event)
+
+        assert len(results) == 1
+        assert "90 games" in results[0].question_text
 
     def test_generate_handles_llm_failure_gracefully(self, sample_extracted_event):
         """RuntimeError from LLMClient should return empty list, not propagate."""

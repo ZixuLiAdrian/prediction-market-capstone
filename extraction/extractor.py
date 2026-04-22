@@ -11,6 +11,7 @@ Orchestrates the LLM extraction process:
 import logging
 from typing import List, Optional
 
+from config import LLMConfig
 from models import Cluster, ExtractedEvent
 from extraction.llm_client import LLMClient
 from extraction.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_user_prompt
@@ -22,8 +23,8 @@ logger = logging.getLogger(__name__)
 class EventExtractor:
     """Extracts structured, market-ready event specifications from clusters using an LLM."""
 
-    def __init__(self, llm_client: LLMClient = None):
-        self.llm_client = llm_client or LLMClient()
+    def __init__(self, llm_client: LLMClient = None, model: str = None):
+        self.llm_client = llm_client or LLMClient(model=model or LLMConfig.FR3_MODEL)
 
     def extract(self, cluster: Cluster, cluster_id: int) -> Optional[ExtractedEvent]:
         """

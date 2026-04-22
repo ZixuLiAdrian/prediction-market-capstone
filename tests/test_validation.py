@@ -16,6 +16,9 @@ from validation.validator import (
     detect_minor_involvement,
     detect_pii_exposure,
     detect_prohibited_topic,
+    detect_weak_resolution_source,
+    detect_weak_resolution_criteria,
+    is_salvageable_validation_flags,
     validate_question,
 )
 
@@ -69,10 +72,87 @@ def test_weak_resolution_source_flag_triggers():
     assert "weak_resolution_source" in result.flags
 
 
+def test_strong_authoritative_resolution_source_passes_for_sec_and_press_release_combo():
+    q = _base_question(
+        category="finance",
+        resolution_source="SEC 8-K filings (sec.gov/cgi-bin/browse-edgar) and company press releases",
+    )
+    result = validate_question(q)
+    assert "weak_resolution_source" not in result.flags
+
+
+def test_strong_authoritative_resolution_source_passes_for_official_election_website():
+    q = _base_question(
+        category="politics",
+        resolution_source="Bulgarian Central Election Commission official website (cec.bg) and Official Government Gazette of Bulgaria (dv.parliament.bg)",
+    )
+    result = validate_question(q)
+    assert "weak_resolution_source" not in result.flags
+
+
+def test_geopolitics_resolution_source_allows_credible_reporting_plus_official_statements():
+    q = _base_question(
+        category="geopolitics",
+        question_text="Will Reuters and AP report that the ceasefire remains in effect on May 15, 2026?",
+        resolution_source="Reuters and AP reporting citing official foreign ministry statements from both parties",
+        resolution_criteria="Resolves YES if both Reuters and AP report that the ceasefire remains in effect. Resolves NO if both report it has collapsed.",
+    )
+    result = validate_question(q)
+    assert "weak_resolution_source" not in result.flags
+
+
+def test_authoritative_category_rejects_generic_news_fallback_even_with_anchor():
+    q = _base_question(
+        category="politics",
+        resolution_source="Republican Party official website (rnc.org) or reputable news sources confirming the nominee",
+    )
+    result = validate_question(q)
+    assert "weak_resolution_source" in result.flags
+
+
+def test_geopolitics_disputed_attribution_question_still_fails():
+    q = _base_question(
+        category="geopolitics",
+        question_text="Which party will be reported to have first violated the ceasefire?",
+        question_type="multiple_choice",
+        options=["Israel", "Hezbollah", "Neither", "Unable to determine"],
+        resolution_source="Reuters and AP reporting citing official statements from both parties",
+        resolution_criteria=(
+            "Resolves to 'Israel' if Reuters and AP report Israel first violated the ceasefire. "
+            "Resolves to 'Hezbollah' if Reuters and AP report Hezbollah first violated it. "
+            "Resolves to 'Neither' if both report no violation occurred. "
+            "Resolves to 'Unable to determine' otherwise."
+        ),
+    )
+    result = validate_question(q)
+    assert "weak_resolution_source" in result.flags or "weak_resolution_criteria" in result.flags
+
+
 def test_weak_resolution_criteria_flag_triggers():
     q = _base_question(resolution_criteria="Outcome if confirmed by reports.")
     result = validate_question(q)
     assert "weak_resolution_criteria" in result.flags
+
+
+def test_detect_weak_resolution_source_rejects_vague_media_phrase():
+    assert detect_weak_resolution_source(
+        "Reported by reputable sources",
+        category="geopolitics",
+        question_text="Will the ceasefire last?",
+        resolution_criteria="Resolves YES if it remains in effect. Resolves NO otherwise.",
+    ) is True
+
+
+def test_multiple_choice_resolution_criteria_is_not_forced_to_yes_no():
+    assert detect_weak_resolution_criteria(
+        (
+            "Resolves to 'No cut (0 bps)' if the rate is unchanged or raised. "
+            "Resolves to '25 bps cut' if the rate is reduced by exactly 25 basis points. "
+            "Resolves to '50 bps cut' if the rate is reduced by exactly 50 basis points."
+        ),
+        question_type="multiple_choice",
+        options=["No cut (0 bps)", "25 bps cut", "50 bps cut"],
+    ) is False
 
 
 def test_invalid_deadline_window_malformed_and_past():
@@ -164,6 +244,14 @@ def test_detect_prohibited_topic_clean_question():
     result = detect_prohibited_topic(
         "Will the Federal Reserve cut interest rates by December 2027?",
         "Resolves YES if the fed funds target range is reduced. Resolves NO otherwise.",
+    )
+    assert result is None
+
+
+def test_detect_prohibited_topic_does_not_false_positive_on_guided():
+    result = detect_prohibited_topic(
+        "Will a guided cancer treatment study lead to an FDA update by December 2027?",
+        "Resolves YES if an FDA update appears. Resolves NO otherwise.",
     )
     assert result is None
 
@@ -284,6 +372,11 @@ def test_detect_excessive_deadline_reasonable():
 def test_detect_excessive_deadline_unparseable():
     """Unparseable deadlines should return False (caught by invalid_deadline_window)."""
     assert detect_excessive_deadline("not-a-date") is False
+
+
+def test_salvageable_validation_flags_helper():
+    assert is_salvageable_validation_flags(["invalid_deadline_window", "weak_resolution_source"]) is True
+    assert is_salvageable_validation_flags(["prohibited_topic:terrorism_content (ied)"]) is False
 
 
 # ---- Integration: validate_question with new checks ----

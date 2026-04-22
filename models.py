@@ -100,6 +100,7 @@ class CandidateQuestion:
     source_independence: float = 0.0      # 0–1: how neutral/unbiased the resolution source is
     timing_reliability: float = 0.0       # 0–1: how reliably source publishes by deadline
     already_resolved: bool = False         # True if event already concluded (auto-rejected by FR4)
+    repair_parent_question_id: Optional[int] = None  # original failed question if this was repaired
     id: Optional[int] = None              # DB-assigned
     raw_llm_response: Optional[str] = None  # full LLM response for debugging
 

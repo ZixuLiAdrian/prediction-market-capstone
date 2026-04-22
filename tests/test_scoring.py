@@ -12,6 +12,7 @@ from scoring.scorer import (
     compute_novelty_score,
     compute_resolution_strength_score,
     compute_time_horizon_score,
+    is_expired_deadline,
     _is_major_sports_event,
     _is_ordinary_match_question,
     is_homepage_source,
@@ -228,6 +229,38 @@ def test_resolution_strength_and_time_horizon_scoring():
         "Wired at https://www.wired.com/"
     ) == 0.2
     assert compute_time_horizon_score("December 31, 2026") in {0.6, 0.9, 1.0, 0.3, 0.2, 0.0}
+
+
+def test_expired_deadline_detection_and_scoring_exclusion():
+    assert is_expired_deadline("2000-01-01") is True
+    assert is_expired_deadline("2999-01-01") is False
+
+    rows = [
+        {
+            "question_id": 1,
+            "question_text": "Will Bitcoin close above $100,000 by January 1, 2999?",
+            "category": "finance",
+            "deadline": "2999-01-01",
+            "resolution_source": "Binance at https://www.binance.com/en/trade/BTC_USDT",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+        },
+        {
+            "question_id": 2,
+            "question_text": "Will Tesla close above $1,000 by January 1, 2000?",
+            "category": "finance",
+            "deadline": "2000-01-01",
+            "resolution_source": "Yahoo Finance at https://finance.yahoo.com/quote/TSLA",
+            "mention_velocity": 1.0,
+            "source_diversity": 2.0,
+            "clarity_score": 1.0,
+        },
+    ]
+    all_texts = [(1, rows[0]["question_text"]), (2, rows[1]["question_text"])]
+
+    scored = score_questions(rows, all_texts)
+    assert [candidate.question_id for candidate in scored] == [1]
 
 
 def test_source_and_media_detection_helpers():

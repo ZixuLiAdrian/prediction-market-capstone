@@ -24,9 +24,28 @@ class DBConfig:
 class LLMConfig:
     PROVIDER = os.getenv("LLM_PROVIDER", "groq")  # "groq" or "gemini"
     MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+    FR3_MODEL = os.getenv("FR3_LLM_MODEL", MODEL)
+    FR4_MODEL = os.getenv("FR4_LLM_MODEL", MODEL)
+    AVAILABLE_MODELS = [
+        "allam-2-7b",
+        "groq/compound",
+        "groq/compound-mini",
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "qwen/qwen3-32b",
+    ]
+    RUNNER_DEFAULT_FR3_MODEL = os.getenv("RUNNER_DEFAULT_FR3_MODEL", "llama-3.1-8b-instant")
+    RUNNER_DEFAULT_FR4_MODEL = os.getenv("RUNNER_DEFAULT_FR4_MODEL", "llama-3.1-8b-instant")
     API_KEY = os.getenv("LLM_API_KEY", "")
     MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+    RATE_LIMIT_MAX_RETRIES = int(os.getenv("LLM_RATE_LIMIT_MAX_RETRIES", "-1"))
     TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
+    MIN_REQUEST_INTERVAL_SECONDS = float(os.getenv("LLM_MIN_REQUEST_INTERVAL_SECONDS", "2.1"))
+    RATE_LIMIT_BACKOFF_BASE_SECONDS = float(os.getenv("LLM_RATE_LIMIT_BACKOFF_BASE_SECONDS", "5.0"))
+    RATE_LIMIT_BACKOFF_MAX_SECONDS = float(os.getenv("LLM_RATE_LIMIT_BACKOFF_MAX_SECONDS", "30.0"))
 
 
 _DEFAULT_RSS_FEEDS = ",".join([
@@ -183,3 +202,7 @@ class ClusteringConfig:
 class PipelineConfig:
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_MODE = os.getenv("LOG_MODE", "normal").strip().lower()
+    FR3_MAX_CLUSTERS = int(os.getenv("FR3_MAX_CLUSTERS", "10"))
+    FR4_MAX_EVENTS = int(os.getenv("FR4_MAX_EVENTS", "5"))
+    FR4_MAX_QUESTIONS_PER_STORY = int(os.getenv("FR4_MAX_QUESTIONS_PER_STORY", "2"))

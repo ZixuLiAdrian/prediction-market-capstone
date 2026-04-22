@@ -8,6 +8,8 @@ import json
 import jsonschema
 import pytest
 
+from config import LLMConfig
+from extraction.extractor import EventExtractor
 from extraction.schema import EXTRACTED_EVENT_SCHEMA, EVENT_TYPE_ENUM
 from extraction.prompts import build_extraction_user_prompt
 from models import ClusterFeatures
@@ -219,3 +221,31 @@ def test_prompt_requests_all_fields():
     assert "tradability" in prompt
     assert "contradiction_flag" in prompt
     assert "confidence" in prompt
+
+
+def test_event_extractor_uses_stage_specific_model_by_default(monkeypatch):
+    """EventExtractor should default to FR3_LLM_MODEL when creating its own client."""
+    captured = {}
+
+    class DummyLLMClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("extraction.extractor.LLMClient", DummyLLMClient)
+    EventExtractor()
+
+    assert captured["model"] == LLMConfig.FR3_MODEL
+
+
+def test_event_extractor_allows_model_override(monkeypatch):
+    """EventExtractor should allow an explicit per-stage model override."""
+    captured = {}
+
+    class DummyLLMClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("extraction.extractor.LLMClient", DummyLLMClient)
+    EventExtractor(model="custom-fr3-model")
+
+    assert captured["model"] == "custom-fr3-model"

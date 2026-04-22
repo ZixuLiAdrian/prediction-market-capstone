@@ -18,6 +18,16 @@ CREATE TABLE IF NOT EXISTS events (
     created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Migration guard: older databases may have an events table without signal_role.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='events' AND column_name='signal_role') THEN
+        ALTER TABLE events ADD COLUMN signal_role VARCHAR(20) DEFAULT 'discovery';
+    END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS idx_events_source_type ON events(source_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_content_hash ON events(content_hash);
@@ -71,7 +81,6 @@ CREATE TABLE IF NOT EXISTS extracted_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_extracted_cluster ON extracted_events(cluster_id);
-CREATE INDEX IF NOT EXISTS idx_extracted_tradability ON extracted_events(tradability);
 
 -- ============================================================
 -- FR4: LLM Question Generation
@@ -79,6 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_extracted_tradability ON extracted_events(tradabi
 CREATE TABLE IF NOT EXISTS candidate_questions (
     id                  SERIAL PRIMARY KEY,
     extracted_event_id  INTEGER REFERENCES extracted_events(id) ON DELETE CASCADE,
+    repair_parent_question_id INTEGER REFERENCES candidate_questions(id) ON DELETE SET NULL,
     question_text       TEXT NOT NULL,
     category            VARCHAR(50) DEFAULT '',       -- e.g. politics, finance, health
     question_type       VARCHAR(20) DEFAULT '',       -- "binary" or "multiple_choice"
@@ -104,11 +114,6 @@ CREATE INDEX IF NOT EXISTS idx_cq_question_type ON candidate_questions(question_
 -- Migration guard: add new columns to existing deployments without dropping data
 DO $$
 BEGIN
-    -- events table
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='events' AND column_name='signal_role') THEN
-        ALTER TABLE events ADD COLUMN signal_role VARCHAR(20) DEFAULT 'discovery';
-    END IF;
     -- clusters table
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name='clusters' AND column_name='source_role_mix') THEN
@@ -164,6 +169,10 @@ BEGIN
         ALTER TABLE extracted_events ADD COLUMN contradiction_details TEXT DEFAULT '';
     END IF;
     -- candidate_questions table
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidate_questions' AND column_name='repair_parent_question_id') THEN
+        ALTER TABLE candidate_questions ADD COLUMN repair_parent_question_id INTEGER REFERENCES candidate_questions(id) ON DELETE SET NULL;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name='candidate_questions' AND column_name='category') THEN
         ALTER TABLE candidate_questions ADD COLUMN category VARCHAR(50) DEFAULT '';
@@ -233,6 +242,10 @@ BEGIN
 END
 $$;
 
+CREATE INDEX IF NOT EXISTS idx_cq_repair_parent ON candidate_questions(repair_parent_question_id);
+
+CREATE INDEX IF NOT EXISTS idx_extracted_tradability ON extracted_events(tradability);
+
 -- ============================================================
 -- FR5: Rule Validation
 -- ============================================================
@@ -262,3 +275,85 @@ CREATE TABLE IF NOT EXISTS scored_candidates (
     rank                    INTEGER DEFAULT 0,
     created_at              TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- ============================================================
+-- Pipeline Runs: background execution tracking for Streamlit
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id                  SERIAL PRIMARY KEY,
+    status              VARCHAR(20) NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+    stage_start         INTEGER NOT NULL DEFAULT 1,
+    stage_end           INTEGER NOT NULL DEFAULT 6,
+    fr3_limit_mode      VARCHAR(20) NOT NULL DEFAULT 'default'
+                        CHECK (fr3_limit_mode IN ('default', 'custom', 'all')),
+    fr3_limit_value     INTEGER,
+    fr4_limit_mode      VARCHAR(20) NOT NULL DEFAULT 'default'
+                        CHECK (fr4_limit_mode IN ('default', 'custom', 'all')),
+    fr4_limit_value     INTEGER,
+    log_mode            VARCHAR(20) NOT NULL DEFAULT 'normal'
+                        CHECK (log_mode IN ('normal', 'debug')),
+    fr3_model           TEXT DEFAULT '',
+    fr4_model           TEXT DEFAULT '',
+    subprocess_pid      INTEGER,
+    error_message       TEXT DEFAULT '',
+    started_at          TIMESTAMP,
+    finished_at         TIMESTAMP,
+    created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_run_stages (
+    id                  SERIAL PRIMARY KEY,
+    run_id              INTEGER NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+    stage_number        INTEGER NOT NULL,
+    stage_name          VARCHAR(100) NOT NULL,
+    status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+    summary             JSONB DEFAULT '{}'::jsonb,
+    error_message       TEXT DEFAULT '',
+    started_at          TIMESTAMP,
+    finished_at         TIMESTAMP,
+    created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, stage_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_stages_run_id ON pipeline_run_stages(run_id);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='pipeline_runs')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='pipeline_runs' AND column_name='fr3_limit_mode') THEN
+        ALTER TABLE pipeline_runs ADD COLUMN fr3_limit_mode VARCHAR(20) DEFAULT 'default';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='pipeline_runs')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='pipeline_runs' AND column_name='fr3_limit_value') THEN
+        ALTER TABLE pipeline_runs ADD COLUMN fr3_limit_value INTEGER;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='pipeline_runs')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='pipeline_runs' AND column_name='fr3_model') THEN
+        ALTER TABLE pipeline_runs ADD COLUMN fr3_model TEXT DEFAULT '';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='pipeline_runs')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='pipeline_runs' AND column_name='fr4_model') THEN
+        ALTER TABLE pipeline_runs ADD COLUMN fr4_model TEXT DEFAULT '';
+    END IF;
+END
+$$;
+
+-- ============================================================
+-- FR7 Review State: Human selection / removal lifecycle
+-- ============================================================
+CREATE TABLE IF NOT EXISTS question_review_state (
+    question_id          INTEGER PRIMARY KEY REFERENCES candidate_questions(id) ON DELETE CASCADE,
+    status               VARCHAR(20) NOT NULL CHECK (status IN ('selected', 'removed')),
+    reason               TEXT DEFAULT '',
+    notes                TEXT DEFAULT '',
+    changed_at           TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_review_state_status ON question_review_state(status);

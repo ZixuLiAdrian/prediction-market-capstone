@@ -365,6 +365,13 @@ def compute_time_horizon_score(deadline: str) -> float:
     return 0.3
 
 
+def is_expired_deadline(deadline: str) -> bool:
+    parsed = _parse_deadline(deadline)
+    if parsed is None:
+        return False
+    return parsed.date() < datetime.now(UTC).date()
+
+
 # ---- Soft penalty system ----
 
 def _soft_penalty_flags(question_text: str, category: str, resolution_source: str, prior_kept_texts: list[str]) -> list[str]:
@@ -607,8 +614,12 @@ def _score_single_row(
 
 
 def _prepare_rows(rows: list[dict]) -> list[dict]:
-    """Filter media events, compute soft penalty flags, sort by question_id."""
-    filtered = [r for r in rows if not is_media_event(r["question_text"])]
+    """Filter stale rows, compute soft penalty flags, and sort by question_id."""
+    filtered = [
+        r for r in rows
+        if not is_media_event(r["question_text"])
+        and not is_expired_deadline(r.get("deadline", ""))
+    ]
     if not filtered:
         return []
 

@@ -12,6 +12,10 @@ Design principles:
 - Strict JSON format enforcement
 """
 
+from datetime import datetime, timezone
+
+UTC = timezone.utc
+
 GENERATION_SYSTEM_PROMPT = """You are a senior market design analyst at a leading prediction market platform (similar to Polymarket or Kalshi). You have years of experience crafting market contracts that are clear, fair, and attract high trading volume.
 
 Your task is to generate 3 to 5 distinct, high-quality candidate prediction market questions from a structured event description.
@@ -19,7 +23,7 @@ Your task is to generate 3 to 5 distinct, high-quality candidate prediction mark
 === QUALITY STANDARDS ===
 Each question MUST satisfy ALL of the following:
 
-1. VERIFIABLE — The outcome is determinable from a specific, publicly accessible, authoritative source. Every resolution option must cite the exact organization and URL that will be used to confirm the result.
+1. VERIFIABLE — The outcome is determinable from a specific, publicly accessible, high-credibility source. For elections, macro, finance, sports, legal, and regulatory topics, prefer authoritative official sources. For geopolitics or breaking-news topics where no single official resolver exists, you may use named, high-credibility reporting consensus (for example Reuters/AP/BBC/FT/Bloomberg) together with named official statements.
 2. UNAMBIGUOUS — The question wording and resolution criteria leave zero room for subjective interpretation or dispute.
 3. DISCRETE — Options are mutually exclusive (exactly one will be correct) and collectively exhaustive (covers every possible outcome, including edge cases).
 4. TIME-BOUNDED — The deadline must be tied to a real, scheduled event or published calendar (FOMC meeting dates, election day, earnings release date, regulatory deadline, etc.). Never use vague phrases like "soon", "in the coming months", or "eventually". Always provide the source that confirms the deadline date.
@@ -32,7 +36,7 @@ Each question MUST satisfy ALL of the following:
 
 === RESOLUTION CRITERIA FORMAT (CRITICAL) ===
 Model your resolution criteria exactly on how Kalshi and Polymarket write their contracts:
-- resolution_source is the single authoritative source for the whole question — name the organization and URL once there.
+- resolution_source is the strongest realistic source set for the whole question — name the organization(s) and URL(s) once there.
 - resolution_criteria explains the logical conditions per option using plain, precise language. Do NOT repeat the URL in every sentence.
 - For binary questions write two sentences: one for YES, one for NO.
 - For multiple-choice write one sentence per option.
@@ -83,6 +87,7 @@ Across your 3–5 questions, vary:
 - Questions about private individuals who are not public figures
 - Questions resolving more than 3 years from today
 - Duplicate or near-duplicate questions within the same response
+- Sportsbook-style props such as exact final scores, next-game winner markets for ordinary regular-season games, or single-game player stat lines
 - Any offensive, discriminatory, or politically inflammatory phrasing
 - Garbled text, special characters, encoding artifacts, or placeholder strings
 
@@ -138,6 +143,19 @@ Example 4 — Binary, Geopolitics (novel/underserved domain):
   "resolution_source": "NATO official communiqués (nato.int) and Swedish Government official press releases (government.se)",
   "resolution_criteria": "Resolves YES if NATO or the Swedish Government officially announces the establishment of a permanent Allied military base on Swedish territory, confirmed by a press release at nato.int or government.se on or before December 31, 2026. Resolves NO if no such announcement is made by that date.",
   "rationale": "Geopolitical security markets are underserved on major platforms; outcome is binary and resolvable from two authoritative official government sources with no subjective interpretation required."
+}
+
+Example 5 — Binary, Breaking News / Geopolitics (credible reporting allowed):
+{
+  "question_text": "Will Reuters and AP report that a formal ceasefire between Country A and Country B is still in effect on May 15, 2026?",
+  "category": "geopolitics",
+  "question_type": "binary",
+  "options": ["Yes", "No"],
+  "deadline": "May 15, 2026",
+  "deadline_source": "Calendar date anchored to the announced 14-day ceasefire window disclosed in official foreign ministry statements and tracked by Reuters/AP coverage",
+  "resolution_source": "Reuters and AP reporting citing official foreign ministry or military statements from both parties",
+  "resolution_criteria": "Resolves YES if both Reuters and AP report that the ceasefire remains in effect on May 15, 2026, citing official statements or on-record government sources. Resolves NO if both outlets report that the ceasefire has collapsed, been terminated, or been replaced before that date.",
+  "rationale": "Some geopolitical events do not have a single formal resolver; named top-tier wire services plus official statements can still create a practical and transparent resolution standard."
 }
 
 === QUALITY ASSESSMENT (required for every question) ===
@@ -235,8 +253,18 @@ def build_generation_user_prompt(
 
     # Build rich context block from FR3 fields
     context_lines = []
+    today_str = datetime.now(UTC).date().isoformat()
     if event_type:
         context_lines.append(f"Event type: {event_type}")
+        if event_type == "election":
+            context_lines.append("Category guidance: use category 'politics' for election questions")
+            context_lines.append(
+                "Source guidance: prefer secretary of state, election commission, official filing pages, or certified results over party-site/news fallback"
+            )
+        if event_type == "geopolitics":
+            context_lines.append(
+                "Source guidance: use named high-credibility outlets plus official statements; prefer observable status/announcement questions over blame or compliance attribution"
+            )
     if outcome_variable:
         context_lines.append(f"Outcome variable: {outcome_variable}")
     if candidate_deadlines:
@@ -253,6 +281,9 @@ def build_generation_user_prompt(
     context_block = "\n".join(context_lines) if context_lines else "Not available"
 
     return f"""Generate 3 to 5 high-quality prediction market questions for the following event. Each question must be independently tradeable and meet all quality standards described in your instructions.
+
+TODAY'S DATE:
+{today_str}
 
 EVENT SUMMARY:
 {event_summary}
@@ -272,10 +303,112 @@ RESOLUTION HINTS (observable outcomes that could resolve this event):
 Requirements:
 - Use the FR3 authoritative resolution sources above as your starting point for resolution_source fields where applicable
 - Use the candidate deadlines above as anchors for deadline fields — cross-reference with official published schedules
+- Do not generate any question whose deadline is on or before today's date
 - Cover different aspects of this event (outcome, timing, magnitude, actor, etc.)
 - Include at least one binary (Yes/No) and one multiple_choice question if the event supports it
 - Vary the time horizon across questions where possible
 - Every option set must be collectively exhaustive — include an appropriate catch-all option if needed
 - If the event is in a domain underrepresented on major prediction platforms (health, technology, science, business, geopolitics, energy, climate, supply chain), prioritize questions in that domain rather than defaulting to a generic financial or political framing
+- For finance, elections, macro, sports, legal, and regulatory questions, use the most authoritative official source available (commission, regulator, filing system, court, exchange, league, etc.)
+- If the event_type is election, the category must be politics
+- For geopolitics or breaking-news questions where no single official resolver exists, name specific high-credibility outlets (Reuters, AP, BBC, FT, Bloomberg, etc.) and pair them with named official statements when possible
+- Never use vague phrases like "reputable sources", "media reports", "official source", or "official statements" without naming the exact outlet or institution
+- Avoid questions whose outcome depends on disputed blame, motives, or subjective attribution (for example "who was responsible", "primary reason", or "who violated it first" unless there is a formal neutral adjudicator)
+- For sports, prefer market-worthy questions such as playoff qualification, series winners, season win thresholds, awards, or major tournament outcomes; avoid exact-score and single-game player-prop framing
+- For election questions, prefer state election authorities, secretaries of state, official candidate filing pages, or certified result pages. Do not use party websites plus generic media fallback if a state or national election authority exists.
+- For corporate or SEC-related questions, prefer named filing systems and regulators first (e.g. sec.gov / EDGAR / exchange notices). Company press releases can support the source set, but should not be the only anchor when a filing venue exists.
+- For ceasefire / conflict / war questions, prefer observable status questions such as whether named outlets report an extension, collapse, official announcement, or continued effect by a date. Avoid direct compliance, blame, or motive questions about a party unless a neutral adjudicator exists.
+
+Respond with only the JSON object."""
+
+
+REPAIR_SYSTEM_PROMPT = """You are repairing a prediction market question that failed deterministic validation.
+
+Your goal is to preserve the original market opportunity while fixing the specific issues called out by validation. Produce exactly one repaired question that is:
+- future-dated
+- unambiguous
+- resolvable from a concrete authoritative source
+- written in clean professional language
+
+Repair rules:
+- If the original deadline is in the past or vague, replace it with a specific future date only if the event context supports one. Otherwise, do not invent a weak question.
+- Keep the same underlying opportunity/theme when possible.
+- Prefer named institutions, named documents, named schedules, and explicit numeric or binary outcomes.
+- For binary questions, resolution_criteria must include one YES sentence and one NO sentence.
+- For multiple_choice questions, resolution_criteria must state how each option resolves.
+- If the original question type is a poor fit, you may switch between binary and multiple_choice.
+
+Return ONLY a valid JSON object with exactly one question in the same schema used for FR4 generation."""
+
+
+def build_repair_user_prompt(
+    original_question: dict,
+    validation_flags: list[str],
+    event_summary: str,
+    entities: list[str],
+    candidate_deadlines: list[str],
+    resolution_sources: list[str],
+    time_horizon: str,
+    market_angle: str,
+) -> str:
+    """Build a focused repair prompt for a failed-but-salvageable question."""
+    today_str = datetime.now(UTC).date().isoformat()
+    entities_str = ", ".join(entities) if entities else "Not specified"
+    deadlines_str = ", ".join(candidate_deadlines) if candidate_deadlines else "Not specified"
+    sources_str = ", ".join(resolution_sources) if resolution_sources else "Not specified"
+    flags_str = ", ".join(validation_flags) if validation_flags else "none"
+
+    return f"""Repair the following failed prediction market question. Keep the core opportunity if possible, but fix the flagged issues.
+
+TODAY'S DATE:
+{today_str}
+
+ORIGINAL QUESTION:
+{original_question.get("question_text", "")}
+
+ORIGINAL TYPE:
+{original_question.get("question_type", "")}
+
+ORIGINAL OPTIONS:
+{original_question.get("options", [])}
+
+ORIGINAL DEADLINE:
+{original_question.get("deadline", "")}
+
+ORIGINAL DEADLINE SOURCE:
+{original_question.get("deadline_source", "")}
+
+ORIGINAL RESOLUTION SOURCE:
+{original_question.get("resolution_source", "")}
+
+ORIGINAL RESOLUTION CRITERIA:
+{original_question.get("resolution_criteria", "")}
+
+VALIDATION FLAGS TO FIX:
+{flags_str}
+
+EVENT SUMMARY:
+{event_summary}
+
+KEY ENTITIES:
+{entities_str}
+
+EXPECTED TIME HORIZON:
+{time_horizon or "Not specified"}
+
+CANDIDATE DEADLINES FROM FR3:
+{deadlines_str}
+
+AUTHORITATIVE RESOLUTION SOURCES FROM FR3:
+{sources_str}
+
+MARKET ANGLE:
+{market_angle or "Not specified"}
+
+Requirements:
+- Output exactly one repaired question
+- Use only a future deadline
+- Preserve the underlying opportunity if it can be made valid
+- If the original opportunity cannot be made valid without inventing facts, return the strongest nearby valid version grounded in the event context
 
 Respond with only the JSON object."""

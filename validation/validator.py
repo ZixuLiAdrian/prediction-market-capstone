@@ -43,10 +43,105 @@ _GENERIC_SOURCE_TERMS = {
     "media reports",
     "public sources",
     "internet",
-    "website",
     "various sources",
     "reputable sources",
-    "press",
+    "official statements",
+}
+
+_GENERIC_NEWS_ONLY_TERMS = {
+    "reported by media",
+    "reported by the media",
+    "reported in the press",
+    "press release",
+    "press releases",
+}
+
+_TRUSTED_MEDIA_TERMS = {
+    "reuters",
+    "associated press",
+    "ap",
+    "bbc",
+    "financial times",
+    "wall street journal",
+    "wsj",
+    "bloomberg",
+    "al jazeera",
+    "haaretz",
+}
+
+_AUTHORITATIVE_SOURCE_TERMS = {
+    "sec.gov",
+    "edgar",
+    "8-k",
+    "10-q",
+    "10-k",
+    "federal reserve",
+    "fomc",
+    "bls.gov",
+    "fda.gov",
+    "clinicaltrials.gov",
+    "congress.gov",
+    "federal register",
+    "court opinion",
+    "court docket",
+    "election commission",
+    "central election commission",
+    "government gazette",
+    "official gazette",
+    "cec.bg",
+    "dv.parliament.bg",
+    "state.gov",
+    "gov.il",
+    "government.se",
+    "nato.int",
+    "un.org",
+    "who.int",
+    "cdc.gov",
+    "sec filing",
+    "stock exchange",
+    "nasdaq",
+    "nyse",
+    "league official",
+    "official results",
+    "investor relations",
+    "company investor relations",
+}
+
+_CREDIBLE_REPORTING_CATEGORIES = {"geopolitics", "other"}
+_AUTHORITATIVE_SOURCE_CATEGORIES = {
+    "politics",
+    "finance",
+    "business",
+    "sports",
+    "legal",
+    "health",
+    "science",
+    "technology",
+    "energy",
+    "environment",
+    "space",
+}
+
+_GENERIC_FALLBACK_PATTERNS = {
+    "or reputable news sources",
+    "or reputable sources",
+    "or news sources",
+    "or media reports",
+    "or official statements",
+}
+
+_DISPUTED_ATTRIBUTION_TERMS = {
+    "primary reason",
+    "main reason",
+    "who is responsible",
+    "who was responsible",
+    "to blame",
+    "blame for",
+    "first violated",
+    "first violation",
+    "declare the ceasefire a success",
+    "acknowledge the ceasefire's success",
+    "acknowledge the ceasefire success",
 }
 
 _WEAK_CRITERIA_TERMS = {
@@ -157,6 +252,24 @@ _MIN_TIMING_RELIABILITY = 0.4
 
 # Max deadline: questions shouldn't resolve more than 5 years out
 _MAX_DEADLINE_YEARS = 5
+_SALVAGEABLE_FLAGS = {
+    "ambiguous_wording",
+    "weak_resolution_source",
+    "weak_resolution_criteria",
+    "invalid_deadline_window",
+    "unclear_binary_condition",
+    "low_resolution_confidence",
+    "low_source_independence",
+    "low_timing_reliability",
+}
+_NON_SALVAGEABLE_PREFIXES = {
+    "prohibited_topic",
+    "manipulation_risk",
+    "minor_involvement",
+    "pii_exposure",
+    "already_resolved",
+    "excessive_deadline",
+}
 
 
 def compute_clarity_score(flags: list[str]) -> float:
@@ -164,8 +277,28 @@ def compute_clarity_score(flags: list[str]) -> float:
     return max(0.0, min(1.0, score))
 
 
+def is_salvageable_validation_flags(flags: list[str]) -> bool:
+    """Return True when every flag is repairable rather than a hard policy block."""
+    if not flags:
+        return False
+
+    for flag in flags:
+        normalized = (flag or "").strip()
+        if any(normalized.startswith(prefix) for prefix in _NON_SALVAGEABLE_PREFIXES):
+            return False
+        base = normalized.split(":", 1)[0]
+        if base not in _SALVAGEABLE_FLAGS:
+            return False
+    return True
+
+
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _contains_term(haystack: str, term: str) -> bool:
+    """Word-boundary-aware term detection to avoid substring false positives."""
+    return re.search(r"\b" + re.escape(term) + r"\b", haystack) is not None
 
 
 # ---- Original checks ----
@@ -173,26 +306,101 @@ def _normalize_text(text: str) -> str:
 def detect_ambiguous_wording(question_text: str, resolution_criteria: str) -> bool:
     haystack = f"{question_text or ''} {resolution_criteria or ''}".lower()
     for term in _AMBIGUOUS_TERMS:
-        if re.search(r"\b" + re.escape(term) + r"\b", haystack):
+        if _contains_term(haystack, term):
             return True
     return False
 
 
-def detect_weak_resolution_source(resolution_source: str) -> bool:
+def _count_trusted_media_mentions(source: str) -> int:
+    count = 0
+    for term in _TRUSTED_MEDIA_TERMS:
+        if term == "ap":
+            if re.search(r"\bap\b", source):
+                count += 1
+        elif term in source:
+            count += 1
+    return count
+
+
+def _has_authoritative_source_anchor(source: str) -> bool:
+    return any(term in source for term in _AUTHORITATIVE_SOURCE_TERMS)
+
+
+def detect_weak_resolution_source(
+    resolution_source: str,
+    category: str = "",
+    question_text: str = "",
+    resolution_criteria: str = "",
+) -> bool:
     source = _normalize_text(resolution_source)
+    category_normalized = _normalize_text(category)
     if len(source) < 15:
         return True
-    if "http://" not in source and "https://" not in source and "." not in source:
+
+    has_locator = "http://" in source or "https://" in source or "." in source
+    has_authoritative_anchor = _has_authoritative_source_anchor(source)
+    trusted_media_mentions = _count_trusted_media_mentions(source)
+    has_trusted_media = trusted_media_mentions > 0
+
+    if category_normalized in _AUTHORITATIVE_SOURCE_CATEGORIES:
+        if any(pattern in source for pattern in _GENERIC_FALLBACK_PATTERNS):
+            return True
+        if has_authoritative_anchor:
+            return False
+
+    if has_authoritative_anchor:
+        return False
+
+    if category_normalized in _CREDIBLE_REPORTING_CATEGORIES and has_trusted_media:
+        combined = _normalize_text(f"{question_text} {resolution_criteria}")
+        if any(term in combined for term in _DISPUTED_ATTRIBUTION_TERMS):
+            return True
+        if any(term in source for term in _GENERIC_SOURCE_TERMS):
+            return True
+        if trusted_media_mentions >= 2:
+            return False
+        if any(anchor in source for anchor in ("official statement", "official statements", "government", "ministry", "spokesperson")):
+            return False
+        if has_locator:
+            return False
+
+    if not has_locator and not has_trusted_media:
         return True
-    return any(term in source for term in _GENERIC_SOURCE_TERMS)
+    if any(term in source for term in _GENERIC_SOURCE_TERMS):
+        return True
+    if any(term in source for term in _GENERIC_NEWS_ONLY_TERMS) and not has_authoritative_anchor:
+        return True
+    return False
 
 
-def detect_weak_resolution_criteria(resolution_criteria: str) -> bool:
+def detect_weak_resolution_criteria(
+    resolution_criteria: str,
+    question_type: str = "binary",
+    options: list[str] | None = None,
+    question_text: str = "",
+) -> bool:
     criteria = _normalize_text(resolution_criteria)
+    combined = _normalize_text(f"{question_text} {resolution_criteria}")
     if len(criteria) < 30:
         return True
-    if "resolves yes" not in criteria and "resolves no" not in criteria:
+    if any(term in combined for term in _DISPUTED_ATTRIBUTION_TERMS):
         return True
+
+    if question_type == "multiple_choice":
+        options = options or []
+        option_mentions = 0
+        for option in options:
+            normalized_option = _normalize_text(option)
+            if normalized_option and normalized_option in criteria:
+                option_mentions += 1
+
+        resolves_to_count = criteria.count("resolves to")
+        if option_mentions < max(2, min(len(options), 3)) and resolves_to_count < 2:
+            return True
+    else:
+        if "resolves yes" not in criteria and "resolves no" not in criteria:
+            return True
+
     return any(term in criteria for term in _WEAK_CRITERIA_TERMS)
 
 
@@ -244,12 +452,12 @@ def detect_prohibited_topic(question_text: str, resolution_criteria: str) -> str
 
     # Terrorism — check first, highest severity
     for term in _TERRORISM_TERMS:
-        if term in haystack:
+        if _contains_term(haystack, term):
             return f"terrorism_content ({term})"
 
     # Illegal activity
     for term in _ILLEGAL_ACTIVITY_TERMS:
-        if term in haystack:
+        if _contains_term(haystack, term):
             return f"illegal_activity ({term})"
 
     # Death market patterns — individual mortality targeting
@@ -265,7 +473,7 @@ def detect_prohibited_topic(question_text: str, resolution_criteria: str) -> str
     # Violence terms — only flag severe forward-looking individual-targeting
     # Skip if it's a state-level action (already checked above)
     if not is_state_action:
-        violence_hits = [t for t in _VIOLENCE_TERMS if re.search(r"\b" + re.escape(t) + r"\b", haystack)]
+        violence_hits = [t for t in _VIOLENCE_TERMS if _contains_term(haystack, t)]
         if violence_hits:
             q_lower = (question_text or "").lower()
             if any(q_lower.startswith(w) for w in ("will", "is", "are", "does", "can", "could")):
@@ -288,7 +496,7 @@ def detect_manipulation_risk(question_text: str) -> bool:
 
     # Direct manipulation terms
     for term in _MANIPULATION_TERMS:
-        if term in haystack:
+        if _contains_term(haystack, term):
             return True
 
     # Moral hazard patterns (questions about whether bad acts will happen)
@@ -320,7 +528,7 @@ def detect_minor_involvement(question_text: str) -> bool:
             # Only flag "minor" if followed by person-like context
             if re.search(r"\bminor\b.{0,30}\b(athlete|player|student|child|person|individual)\b", haystack):
                 return True
-        elif term in haystack:
+        elif _contains_term(haystack, term):
             # Skip "children" in contexts like "children's hospital" (org name)
             if term == "children" and "children's" in haystack:
                 continue
@@ -383,9 +591,19 @@ def validate_question(q: CandidateQuestion) -> ValidationResult:
     # --- Quality checks ---
     if detect_ambiguous_wording(q.question_text, q.resolution_criteria):
         flags.append("ambiguous_wording")
-    if detect_weak_resolution_source(q.resolution_source):
+    if detect_weak_resolution_source(
+        q.resolution_source,
+        category=q.category,
+        question_text=q.question_text,
+        resolution_criteria=q.resolution_criteria,
+    ):
         flags.append("weak_resolution_source")
-    if detect_weak_resolution_criteria(q.resolution_criteria):
+    if detect_weak_resolution_criteria(
+        q.resolution_criteria,
+        q.question_type,
+        q.options,
+        question_text=q.question_text,
+    ):
         flags.append("weak_resolution_criteria")
     if detect_invalid_deadline_window(q.deadline):
         flags.append("invalid_deadline_window")
