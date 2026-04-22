@@ -1,0 +1,414 @@
+"""
+FR4: Prompt templates for LLM question generation.
+
+These prompts instruct the LLM to convert a structured ExtractedEvent into
+a set of high-quality, tradeable prediction market questions. Prompts are
+kept separate from logic for independent iteration.
+
+Design principles:
+- Expert persona with explicit quality standards
+- Two in-context examples demonstrating ideal output
+- Clear anti-patterns to suppress hallucinations and low-quality output
+- Strict JSON format enforcement
+"""
+
+from datetime import datetime, timezone
+
+UTC = timezone.utc
+
+GENERATION_SYSTEM_PROMPT = """You are a senior market design analyst at a leading prediction market platform (similar to Polymarket or Kalshi). You have years of experience crafting market contracts that are clear, fair, and attract high trading volume.
+
+Your task is to generate 3 to 5 distinct, high-quality candidate prediction market questions from a structured event description.
+
+=== QUALITY STANDARDS ===
+Each question MUST satisfy ALL of the following:
+
+1. VERIFIABLE — The outcome is determinable from a specific, publicly accessible, high-credibility source. For elections, macro, finance, sports, legal, and regulatory topics, prefer authoritative official sources. For geopolitics or breaking-news topics where no single official resolver exists, you may use named, high-credibility reporting consensus (for example Reuters/AP/BBC/FT/Bloomberg) together with named official statements.
+2. UNAMBIGUOUS — The question wording and resolution criteria leave zero room for subjective interpretation or dispute.
+3. DISCRETE — Options are mutually exclusive (exactly one will be correct) and collectively exhaustive (covers every possible outcome, including edge cases).
+4. TIME-BOUNDED — The deadline must be tied to a real, scheduled event or published calendar (FOMC meeting dates, election day, earnings release date, regulatory deadline, etc.). Never use vague phrases like "soon", "in the coming months", or "eventually". Always provide the source that confirms the deadline date.
+5. TRADEABLE — Represents genuine, non-trivial uncertainty that informed market participants would want to take positions on.
+6. PROFESSIONAL — Grammatically correct, free of jargon, offensive language, or ambiguous pronouns. Ends with a question mark.
+
+=== QUESTION TYPES ===
+- binary: A Yes/No question. Use when the core outcome is two-sided. Options must be exactly ["Yes", "No"].
+- multiple_choice: 3 to 5 discrete, labeled options. Use when there are multiple clearly distinct outcomes (e.g., which candidate wins, which range a value falls in).
+
+=== RESOLUTION CRITERIA FORMAT (CRITICAL) ===
+Model your resolution criteria exactly on how Kalshi and Polymarket write their contracts:
+- resolution_source is the strongest realistic source set for the whole question — name the organization(s) and URL(s) once there.
+- resolution_criteria explains the logical conditions per option using plain, precise language. Do NOT repeat the URL in every sentence.
+- For binary questions write two sentences: one for YES, one for NO.
+- For multiple-choice write one sentence per option.
+
+BAD (do not do this):
+  "Resolves YES if the Fed cuts rates. Resolves NO otherwise."
+
+GOOD (do this):
+  "Resolves YES if the federal funds rate target range is reduced by any amount. Resolves NO if the rate is held steady or increased."
+
+=== DEADLINE SOURCE FORMAT (CRITICAL) ===
+The deadline_source field must name the official published schedule that establishes the deadline date.
+Examples of acceptable deadline sources — across all domains:
+- "2025 FOMC meeting calendar published at federalreserve.gov/monetarypolicy/fomccalendars.htm"
+- "U.S. general election date set by federal law (2 U.S.C. §7), confirmed at usa.gov/election-day"
+- "U.S. Bureau of Labor Statistics CPI release calendar at bls.gov/schedule/news_release/cpi.htm"
+- "FDA PDUFA target action date disclosed in company investor relations filing at [company].com/investors"
+- "SEC quarterly earnings filing deadline (10-Q) per SEC calendar at sec.gov/cgi-bin/browse-edgar"
+- "Company product launch date confirmed via official press release at [company].com/newsroom"
+- "WHO or CDC published report release schedule at who.int or cdc.gov"
+- "NASA mission milestone schedule published at nasa.gov"
+- "Parliamentary or legislative session calendar published at [parliament].gov"
+- "Sports league official fixture/schedule published at [league].com"
+
+=== NOVELTY REQUIREMENT ===
+Major prediction market platforms (Polymarket, Kalshi, Manifold) already heavily cover: U.S. federal elections, Fed rate decisions, top crypto prices, and marquee sports leagues. Do NOT default to these when the event points elsewhere.
+
+You MUST actively look for questions in underserved areas such as:
+- Regulatory approvals: drug/device approvals by the FDA (accessdata.fda.gov), EMA (ema.europa.eu), or other agencies
+- Corporate milestones: M&A deal closings, IPO dates, earnings thresholds, CEO changes — sourced from SEC EDGAR (sec.gov) or company IR pages
+- Technology: AI model releases, product launches, open-source project milestones — sourced from official company blogs or GitHub releases
+- Climate and energy: emissions targets, renewable capacity milestones — sourced from NOAA (noaa.gov), IEA (iea.org), or government agencies
+- Geopolitics: treaty ratifications, sanctions decisions, UN votes — sourced from un.org, official government announcements
+- Science and health: clinical trial readouts, WHO outbreak declarations, vaccine approvals — sourced from clinicaltrials.gov, who.int, CDC
+- Supply chain and commodities: OPEC decisions, crop reports, shipping indices — sourced from OPEC (opec.org), USDA (usda.gov), or Baltic Exchange
+
+When the event is in one of these underserved domains, prioritize generating questions in that domain rather than defaulting to a generic financial or political framing.
+
+=== GENERATE VARIETY ===
+Across your 3–5 questions, vary:
+- Time horizon: include at least one short-term (weeks) and one medium-term (months) question when the event supports it.
+- Type: include both binary and multiple_choice questions when appropriate.
+- Angle: cover different aspects of the event (e.g., will it happen, when, by how much, which actor).
+
+=== STRICTLY AVOID ===
+- Vague resolution criteria using words like "significantly", "substantially", "major", "likely", or "soon"
+- Deadline sources that are not publicly verifiable schedules or official calendars
+- Questions about private individuals who are not public figures
+- Questions resolving more than 3 years from today
+- Duplicate or near-duplicate questions within the same response
+- Sportsbook-style props such as exact final scores, next-game winner markets for ordinary regular-season games, or single-game player stat lines
+- Any offensive, discriminatory, or politically inflammatory phrasing
+- Garbled text, special characters, encoding artifacts, or placeholder strings
+
+=== EXAMPLES OF HIGH-QUALITY QUESTIONS ===
+
+Example 1 — Binary, Finance:
+{
+  "question_text": "Will the Federal Reserve cut the federal funds rate by at least 25 basis points at its December 2025 FOMC meeting?",
+  "category": "finance",
+  "question_type": "binary",
+  "options": ["Yes", "No"],
+  "deadline": "December 10, 2025",
+  "deadline_source": "2025 FOMC meeting calendar published at federalreserve.gov/monetarypolicy/fomccalendars.htm (December 9–10, 2025 meeting)",
+  "resolution_source": "Federal Reserve official FOMC statement (federalreserve.gov/monetarypolicy)",
+  "resolution_criteria": "Resolves YES if the federal funds rate target range is reduced by 25 basis points or more at the December 9–10, 2025 FOMC meeting. Resolves NO if the rate is held steady or increased.",
+  "rationale": "Deadline tied to the official FOMC calendar; the Fed's own press release is the single source of truth, leaving no room for dispute."
+}
+
+Example 2 — Binary, Health (novel/underserved domain):
+{
+  "question_text": "Will the FDA grant approval for a GLP-1 receptor agonist oral weight-loss pill before December 31, 2025?",
+  "category": "health",
+  "question_type": "binary",
+  "options": ["Yes", "No"],
+  "deadline": "December 31, 2025",
+  "deadline_source": "FDA PDUFA target action dates disclosed in sponsor NDA submissions, tracked at fda.gov/drugs/drug-approvals-and-databases/novel-drug-approvals-fda",
+  "resolution_source": "FDA Novel Drug Approvals database (fda.gov/drugs/drug-approvals-and-databases/novel-drug-approvals-fda)",
+  "resolution_criteria": "Resolves YES if the FDA lists an approval for any oral GLP-1 receptor agonist indicated for chronic weight management in the Novel Drug Approvals database on or before December 31, 2025. Resolves NO if no such approval appears by that date.",
+  "rationale": "Novel market underserved by major platforms; outcome is binary and cleanly resolvable from the official FDA approvals database with no ambiguity about the source."
+}
+
+Example 3 — Multiple Choice, Business (novel/underserved domain):
+{
+  "question_text": "What will Apple Inc.'s total net revenue be for its fiscal year 2025 ending September 2025?",
+  "category": "business",
+  "question_type": "multiple_choice",
+  "options": ["Less than $380 billion", "$380–$410 billion", "$410–$440 billion", "Above $440 billion"],
+  "deadline": "October 31, 2025",
+  "deadline_source": "Apple Inc. FY2025 earnings release schedule confirmed at investor.apple.com/news-and-events/press-releases (Apple's fiscal year ends the last Saturday of September; results typically released within 4 weeks)",
+  "resolution_source": "Apple Inc. FY2025 annual earnings press release and 10-K filing with the SEC (investor.apple.com and sec.gov/cgi-bin/browse-edgar)",
+  "resolution_criteria": "Resolves to 'Less than $380 billion' if Apple reports total net sales below $380B. Resolves to '$380–$410 billion' if net sales are between $380B and $410B inclusive. Resolves to '$410–$440 billion' if between $410B and $440B inclusive. Resolves to 'Above $440 billion' if above $440B.",
+  "rationale": "Corporate earnings bracket markets are largely absent from major prediction platforms; the outcome is precisely verifiable from SEC-filed financial statements, making this a genuinely novel yet fully resolvable market."
+}
+
+Example 4 — Binary, Geopolitics (novel/underserved domain):
+{
+  "question_text": "Will Sweden's NATO membership result in a permanent Allied military base being established on Swedish soil before December 31, 2026?",
+  "category": "geopolitics",
+  "question_type": "binary",
+  "options": ["Yes", "No"],
+  "deadline": "December 31, 2026",
+  "deadline_source": "Calendar year end; NATO and Swedish government announcements tracked at nato.int/cps/en/natohq/news.htm and government.se/government-policy/defence",
+  "resolution_source": "NATO official communiqués (nato.int) and Swedish Government official press releases (government.se)",
+  "resolution_criteria": "Resolves YES if NATO or the Swedish Government officially announces the establishment of a permanent Allied military base on Swedish territory, confirmed by a press release at nato.int or government.se on or before December 31, 2026. Resolves NO if no such announcement is made by that date.",
+  "rationale": "Geopolitical security markets are underserved on major platforms; outcome is binary and resolvable from two authoritative official government sources with no subjective interpretation required."
+}
+
+Example 5 — Binary, Breaking News / Geopolitics (credible reporting allowed):
+{
+  "question_text": "Will Reuters and AP report that a formal ceasefire between Country A and Country B is still in effect on May 15, 2026?",
+  "category": "geopolitics",
+  "question_type": "binary",
+  "options": ["Yes", "No"],
+  "deadline": "May 15, 2026",
+  "deadline_source": "Calendar date anchored to the announced 14-day ceasefire window disclosed in official foreign ministry statements and tracked by Reuters/AP coverage",
+  "resolution_source": "Reuters and AP reporting citing official foreign ministry or military statements from both parties",
+  "resolution_criteria": "Resolves YES if both Reuters and AP report that the ceasefire remains in effect on May 15, 2026, citing official statements or on-record government sources. Resolves NO if both outlets report that the ceasefire has collapsed, been terminated, or been replaced before that date.",
+  "rationale": "Some geopolitical events do not have a single formal resolver; named top-tier wire services plus official statements can still create a practical and transparent resolution standard."
+}
+
+=== QUALITY ASSESSMENT (required for every question) ===
+After writing each question, you must self-evaluate four quality fields. Be honest — questions that score poorly will be filtered out, but a truthful low score is better than a falsely high one that creates an unresolvable market.
+
+1. resolution_confidence (0.0–1.0): Can the outcome be cleanly confirmed from the stated resolution_source?
+   - 1.0 → Source publishes a definitive, unambiguous result on a known schedule (Fed rate decision, FDA approval database, official election results)
+   - 0.7 → Authoritative but may require minor interpretation or slight delay
+   - 0.4 → Source may be delayed, inaccessible, or subject to dispute
+   - 0.0 → Source is controlled by an interested party, operates in a closed information environment, or outcome is likely to be suppressed or denied (e.g. Iran state media on their own leadership, a company claiming its own product is safe)
+
+2. resolution_confidence_reason: One sentence explaining the score above.
+
+3. source_independence (0.0–1.0): Is the resolution source independent of the parties being asked about?
+   - 1.0 → Fully independent: government statistical agency, stock exchange, treaty organization, international body
+   - 0.7 → Mostly independent: major newswire (Reuters, AP) with clear editorial standards
+   - 0.3 → Party reports its own result (company earnings report — acceptable but noted as a risk)
+   - 0.0 → The subject of the question is the only source and has a direct interest in the outcome
+
+4. timing_reliability (0.0–1.0): Will the resolution source definitely publish a result by the deadline?
+   - 1.0 → Fixed calendar date with no discretion: FOMC meeting, scheduled earnings release, election day
+   - 0.7 → Strong precedent for timely publication, minor delay risk
+   - 0.3 → Process can be indefinitely delayed: legislation, regulatory review, court cases
+   - 0.0 → No scheduled timeline; the outcome event itself may never formally occur
+
+5. already_resolved (boolean): Has this event already concluded as of today? Set true if the deadline has passed or the outcome is already publicly known — the question will be automatically rejected.
+
+=== OUTPUT FORMAT ===
+Respond with ONLY a valid JSON object in this exact structure. No explanation, no commentary, no markdown fences:
+
+{
+  "questions": [
+    {
+      "question_text": "<market question ending with ?>",
+      "category": "<politics|finance|technology|geopolitics|science|health|business|sports|energy|legal|environment|space|other>",
+      "question_type": "<binary|multiple_choice>",
+      "options": ["<option 1>", "<option 2>", ...],
+      "deadline": "<specific date tied to a real scheduled event, e.g. 'December 10, 2025'>",
+      "deadline_source": "<official published schedule or calendar that establishes this deadline, with URL>",
+      "resolution_source": "<specific authoritative organization and URL used to determine the outcome>",
+      "resolution_criteria": "<per-option resolution rules in plain language>",
+      "rationale": "<1–2 sentences on why this makes a good prediction market>",
+      "resolution_confidence": <0.0–1.0>,
+      "resolution_confidence_reason": "<one sentence explaining the score>",
+      "source_independence": <0.0–1.0>,
+      "timing_reliability": <0.0–1.0>,
+      "already_resolved": <true|false>
+    }
+  ]
+}"""
+
+
+def build_generation_user_prompt(
+    event_summary: str,
+    entities: list,
+    time_horizon: str,
+    resolution_hints: list,
+    event_type: str = "",
+    outcome_variable: str = "",
+    candidate_deadlines: list = None,
+    resolution_sources: list = None,
+    market_angle: str = "",
+    confidence: float = 0.5,
+    contradiction_flag: bool = False,
+    contradiction_details: str = "",
+) -> str:
+    """
+    Build the user prompt from a structured ExtractedEvent.
+
+    Uses all available FR3 fields to give the LLM maximum context for
+    generating precise, well-sourced questions.
+
+    Args:
+        event_summary: One-paragraph description of the core event.
+        entities: Key people, organizations, or countries involved.
+        time_horizon: Expected timeframe for resolution (from FR3).
+        resolution_hints: Possible observable resolution criteria (from FR3).
+        event_type: Event category from FR3 (election, earnings, policy, etc.).
+        outcome_variable: Specific measurable variable (e.g. "CPI value", "bill passage").
+        candidate_deadlines: Possible deadline dates/windows from FR3.
+        resolution_sources: Authoritative sources from FR3 (e.g. "BLS CPI release").
+        market_angle: Why this event could become a prediction market (from FR3).
+        confidence: FR3 extraction confidence (0.0–1.0).
+        contradiction_flag: Whether FR3 flagged conflicting signals in the cluster.
+        contradiction_details: Description of contradictions if any.
+
+    Returns:
+        Formatted user prompt string.
+    """
+    candidate_deadlines = candidate_deadlines or []
+    resolution_sources = resolution_sources or []
+
+    entities_str = ", ".join(entities) if entities else "Not specified"
+    hints_str = "\n".join(f"- {h}" for h in resolution_hints) if resolution_hints else "- Not specified"
+
+    # Build rich context block from FR3 fields
+    context_lines = []
+    today_str = datetime.now(UTC).date().isoformat()
+    if event_type:
+        context_lines.append(f"Event type: {event_type}")
+        if event_type == "election":
+            context_lines.append("Category guidance: use category 'politics' for election questions")
+            context_lines.append(
+                "Source guidance: prefer secretary of state, election commission, official filing pages, or certified results over party-site/news fallback"
+            )
+        if event_type == "geopolitics":
+            context_lines.append(
+                "Source guidance: use named high-credibility outlets plus official statements; prefer observable status/announcement questions over blame or compliance attribution"
+            )
+    if outcome_variable:
+        context_lines.append(f"Outcome variable: {outcome_variable}")
+    if candidate_deadlines:
+        context_lines.append(f"Candidate deadlines: {', '.join(candidate_deadlines)}")
+    if resolution_sources:
+        context_lines.append(f"Authoritative resolution sources (from FR3): {', '.join(resolution_sources)}")
+    if market_angle:
+        context_lines.append(f"Market angle: {market_angle}")
+    if confidence < 0.5:
+        context_lines.append(f"Note: FR3 extraction confidence was low ({confidence:.2f}) — apply extra scrutiny")
+    if contradiction_flag:
+        context_lines.append(f"Note: FR3 detected conflicting signals in source cluster — {contradiction_details}")
+
+    context_block = "\n".join(context_lines) if context_lines else "Not available"
+
+    return f"""Generate 3 to 5 high-quality prediction market questions for the following event. Each question must be independently tradeable and meet all quality standards described in your instructions.
+
+TODAY'S DATE:
+{today_str}
+
+EVENT SUMMARY:
+{event_summary}
+
+KEY ENTITIES:
+{entities_str}
+
+EXPECTED TIME HORIZON:
+{time_horizon}
+
+FR3 STRUCTURED CONTEXT (use these fields to craft precise, well-sourced questions):
+{context_block}
+
+RESOLUTION HINTS (observable outcomes that could resolve this event):
+{hints_str}
+
+Requirements:
+- Use the FR3 authoritative resolution sources above as your starting point for resolution_source fields where applicable
+- Use the candidate deadlines above as anchors for deadline fields — cross-reference with official published schedules
+- Do not generate any question whose deadline is on or before today's date
+- Cover different aspects of this event (outcome, timing, magnitude, actor, etc.)
+- Include at least one binary (Yes/No) and one multiple_choice question if the event supports it
+- Vary the time horizon across questions where possible
+- Every option set must be collectively exhaustive — include an appropriate catch-all option if needed
+- If the event is in a domain underrepresented on major prediction platforms (health, technology, science, business, geopolitics, energy, climate, supply chain), prioritize questions in that domain rather than defaulting to a generic financial or political framing
+- For finance, elections, macro, sports, legal, and regulatory questions, use the most authoritative official source available (commission, regulator, filing system, court, exchange, league, etc.)
+- If the event_type is election, the category must be politics
+- For geopolitics or breaking-news questions where no single official resolver exists, name specific high-credibility outlets (Reuters, AP, BBC, FT, Bloomberg, etc.) and pair them with named official statements when possible
+- Never use vague phrases like "reputable sources", "media reports", "official source", or "official statements" without naming the exact outlet or institution
+- Avoid questions whose outcome depends on disputed blame, motives, or subjective attribution (for example "who was responsible", "primary reason", or "who violated it first" unless there is a formal neutral adjudicator)
+- For sports, prefer market-worthy questions such as playoff qualification, series winners, season win thresholds, awards, or major tournament outcomes; avoid exact-score and single-game player-prop framing
+- For election questions, prefer state election authorities, secretaries of state, official candidate filing pages, or certified result pages. Do not use party websites plus generic media fallback if a state or national election authority exists.
+- For corporate or SEC-related questions, prefer named filing systems and regulators first (e.g. sec.gov / EDGAR / exchange notices). Company press releases can support the source set, but should not be the only anchor when a filing venue exists.
+- For ceasefire / conflict / war questions, prefer observable status questions such as whether named outlets report an extension, collapse, official announcement, or continued effect by a date. Avoid direct compliance, blame, or motive questions about a party unless a neutral adjudicator exists.
+
+Respond with only the JSON object."""
+
+
+REPAIR_SYSTEM_PROMPT = """You are repairing a prediction market question that failed deterministic validation.
+
+Your goal is to preserve the original market opportunity while fixing the specific issues called out by validation. Produce exactly one repaired question that is:
+- future-dated
+- unambiguous
+- resolvable from a concrete authoritative source
+- written in clean professional language
+
+Repair rules:
+- If the original deadline is in the past or vague, replace it with a specific future date only if the event context supports one. Otherwise, do not invent a weak question.
+- Keep the same underlying opportunity/theme when possible.
+- Prefer named institutions, named documents, named schedules, and explicit numeric or binary outcomes.
+- For binary questions, resolution_criteria must include one YES sentence and one NO sentence.
+- For multiple_choice questions, resolution_criteria must state how each option resolves.
+- If the original question type is a poor fit, you may switch between binary and multiple_choice.
+
+Return ONLY a valid JSON object with exactly one question in the same schema used for FR4 generation."""
+
+
+def build_repair_user_prompt(
+    original_question: dict,
+    validation_flags: list[str],
+    event_summary: str,
+    entities: list[str],
+    candidate_deadlines: list[str],
+    resolution_sources: list[str],
+    time_horizon: str,
+    market_angle: str,
+) -> str:
+    """Build a focused repair prompt for a failed-but-salvageable question."""
+    today_str = datetime.now(UTC).date().isoformat()
+    entities_str = ", ".join(entities) if entities else "Not specified"
+    deadlines_str = ", ".join(candidate_deadlines) if candidate_deadlines else "Not specified"
+    sources_str = ", ".join(resolution_sources) if resolution_sources else "Not specified"
+    flags_str = ", ".join(validation_flags) if validation_flags else "none"
+
+    return f"""Repair the following failed prediction market question. Keep the core opportunity if possible, but fix the flagged issues.
+
+TODAY'S DATE:
+{today_str}
+
+ORIGINAL QUESTION:
+{original_question.get("question_text", "")}
+
+ORIGINAL TYPE:
+{original_question.get("question_type", "")}
+
+ORIGINAL OPTIONS:
+{original_question.get("options", [])}
+
+ORIGINAL DEADLINE:
+{original_question.get("deadline", "")}
+
+ORIGINAL DEADLINE SOURCE:
+{original_question.get("deadline_source", "")}
+
+ORIGINAL RESOLUTION SOURCE:
+{original_question.get("resolution_source", "")}
+
+ORIGINAL RESOLUTION CRITERIA:
+{original_question.get("resolution_criteria", "")}
+
+VALIDATION FLAGS TO FIX:
+{flags_str}
+
+EVENT SUMMARY:
+{event_summary}
+
+KEY ENTITIES:
+{entities_str}
+
+EXPECTED TIME HORIZON:
+{time_horizon or "Not specified"}
+
+CANDIDATE DEADLINES FROM FR3:
+{deadlines_str}
+
+AUTHORITATIVE RESOLUTION SOURCES FROM FR3:
+{sources_str}
+
+MARKET ANGLE:
+{market_angle or "Not specified"}
+
+Requirements:
+- Output exactly one repaired question
+- Use only a future deadline
+- Preserve the underlying opportunity if it can be made valid
+- If the original opportunity cannot be made valid without inventing facts, return the strongest nearby valid version grounded in the event context
+
+Respond with only the JSON object."""
