@@ -290,6 +290,16 @@ Some behavior is intentionally opinionated:
 - FR5 uses category-aware source validation so geopolitics/news questions are not judged by the same standard as SEC filings or elections
 - Streamlit review state is stored in PostgreSQL rather than session state so selections persist across reruns and demos
 
+## V2: Trader Intelligence
+
+The V1 product (everything documented above) is aimed at prediction-market *operators*: it generates new candidate questions and surfaces a ranked review queue for listing teams to ship. V2, *Trader Intelligence*, reuses the same FR1–FR7 spine but pivots the funnel toward *traders* — surfacing what is tradeable right now and what is worth watching, rather than producing new contracts.
+
+- **Audience:** retail and prosumer traders on venues like Kalshi and Polymarket.
+- **Output:** intelligence, not contracts — a live-market hot list plus a research feed of emerging topics.
+- **Frontend:** a consumer-facing discovery dashboard that emphasises *Active Markets*, *Emerging Topics*, trend signals, and category exploration, with admin controls collapsed into secondary tools.
+
+The V2 codebase lives alongside V1 in [`Trader Intelligence Ver/`](Trader%20Intelligence%20Ver/README.md), as a parallel copy of the pipeline so the two product framings can evolve independently without disturbing the V1 review tool. The FR1–FR7 boundaries are unchanged; the V2 diff is additive (Kalshi/Polymarket pulled as benchmark events in FR1, an `emergence_score` and `has_existing_market` flag in FR2, plain-English uncertainty + existing-market links in FR3, optional research briefings in FR4, a `display_section` tag in FR5, two scoring profiles in parallel in FR6, and the discovery layout in FR7). See [`Trader Intelligence Ver/README.md`](Trader%20Intelligence%20Ver/README.md) for the V2-specific setup and run instructions.
+
 ## Team Member Responsibilities
 
 | Area | Initial | Iteration 2 | Iteration 3 |
@@ -297,5 +307,6 @@ Some behavior is intentionally opinionated:
 | FR1–FR3 (Ingestion, Clustering, Extraction) | Zixu Li | Jack Jia | Zixu Li |
 | FR4 (Question Generation) | Jack Jia | Zixu Li | Jack Jia |
 | FR5–FR7 (Validation, Scoring, Dashboard) | Jia Herng Yap | | |
+| Trader Intelligence (V2) | Yanzhe Huang | | |
 | Final Integration | Jack Jia | Zixu Li | Jia Herng Yap |
 | Execution Testing | Jia Herng Yap | | |
