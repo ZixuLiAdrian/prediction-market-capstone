@@ -875,18 +875,75 @@ def get_dashboard_scored_questions() -> List[Dict]:
                 sc.market_interest_score, sc.resolution_strength_score,
                 sc.time_horizon_score,
                 cq.question_text, cq.category, cq.question_type,
-                cq.options, cq.deadline, cq.resolution_source,
+                cq.options, cq.deadline, cq.deadline_source, cq.resolution_source,
                 cq.resolution_criteria, cq.rationale,
                 cq.resolution_confidence, cq.source_independence,
                 cq.timing_reliability, cq.created_at AS question_created_at,
+                vr.is_valid, vr.flags AS validation_flags,
                 qrs.status AS review_status,
                 qrs.reason AS review_reason,
                 qrs.notes AS review_notes,
                 qrs.changed_at AS review_changed_at
             FROM scored_candidates sc
             JOIN candidate_questions cq ON cq.id = sc.question_id
+            LEFT JOIN validation_results vr ON vr.question_id = cq.id
             LEFT JOIN question_review_state qrs ON qrs.question_id = cq.id
             ORDER BY sc.total_score DESC, sc.question_id ASC
+            """
+        )
+        return cur.fetchall()
+
+
+def get_dashboard_topics() -> List[Dict]:
+    """
+    Retrieve topic-level discovery rows for the consumer dashboard.
+
+    The query rolls up extracted events, linked source events, and generated
+    candidate questions so Streamlit can compute a simple deterministic trend
+    score without needing to know table relationships.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                ee.id,
+                COALESCE(NULLIF(ee.event_summary, ''), 'Emerging topic') AS title,
+                ee.event_summary AS summary,
+                COALESCE(
+                    (
+                        ARRAY_AGG(
+                            NULLIF(cq.category, '')
+                            ORDER BY sc.total_score DESC NULLS LAST, cq.id ASC
+                        )
+                    )[1],
+                    NULLIF(ee.event_type, ''),
+                    'other'
+                ) AS category,
+                COUNT(DISTINCT ce.event_id) AS event_count,
+                COUNT(DISTINCT e.source) AS source_count,
+                COUNT(DISTINCT cq.id) AS suggested_market_count,
+                AVG(sc.total_score) AS avg_candidate_score,
+                MAX(e.timestamp) AS latest_event_at,
+                (
+                    ARRAY_AGG(
+                        cq.question_text
+                        ORDER BY sc.total_score DESC NULLS LAST, cq.id ASC
+                    )
+                )[1] AS example_question
+            FROM extracted_events ee
+            JOIN clusters c ON c.id = ee.cluster_id
+            LEFT JOIN cluster_events ce ON ce.cluster_id = c.id
+            LEFT JOIN events e ON e.id = ce.event_id
+            LEFT JOIN candidate_questions cq ON cq.extracted_event_id = ee.id
+            LEFT JOIN scored_candidates sc ON sc.question_id = cq.id
+            GROUP BY
+                ee.id,
+                ee.event_summary,
+                ee.event_type
+            ORDER BY
+                MAX(e.timestamp) DESC NULLS LAST,
+                COUNT(DISTINCT ce.event_id) DESC,
+                ee.id ASC
             """
         )
         return cur.fetchall()
