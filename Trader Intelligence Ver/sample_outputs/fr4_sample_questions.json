@@ -1,0 +1,46 @@
+[
+  {
+    "extracted_event_id": 1,
+    "question_text": "Will the FDA approve tirzepatide (Zepbound) for obstructive sleep apnea treatment by December 31, 2025?",
+    "category": "health",
+    "question_type": "binary",
+    "options": ["Yes", "No"],
+    "deadline": "2025-12-31",
+    "deadline_source": "https://www.fda.gov/patients/drug-development-process/step-4-fda-drug-review",
+    "resolution_source": "FDA Drug Approvals Database — https://www.fda.gov/drugs/drug-approvals-and-databases/novel-drug-approvals-fda",
+    "resolution_criteria": "Yes: FDA issues an approval letter for tirzepatide (Zepbound) for the sleep apnea indication on or before December 31, 2025. No: No approval letter is issued by that date, or the application is rejected or withdrawn.",
+    "rationale": "Eli Lilly submitted an sNDA for Zepbound in sleep apnea — a large underserved indication with a clear regulatory deadline and a single authoritative resolution source (FDA approval database).",
+    "raw_llm_response": null
+  },
+  {
+    "extracted_event_id": 2,
+    "question_text": "What will Apple's total revenue be for fiscal year 2025 (ending September 2025)?",
+    "category": "business",
+    "question_type": "multiple_choice",
+    "options": [
+      "Below $380 billion",
+      "$380–$400 billion",
+      "$400–$420 billion",
+      "Above $420 billion"
+    ],
+    "deadline": "2025-10-30",
+    "deadline_source": "https://investor.apple.com/investor-relations/financial-information/sec-filings/default.aspx",
+    "resolution_source": "Apple Inc. FY2025 Annual Report (10-K) — https://investor.apple.com/investor-relations/financial-information/sec-filings/default.aspx",
+    "resolution_criteria": "Resolve to whichever bracket contains Apple's total net sales as reported in the FY2025 10-K filed with the SEC. Apple's fiscal year ends in late September; the 10-K is typically filed within 40 days.",
+    "rationale": "Apple's earnings are a high-volume signal in financial prediction markets; bracketed revenue outcomes create a more informative multiple-choice market than a simple beat/miss binary.",
+    "raw_llm_response": null
+  },
+  {
+    "extracted_event_id": 3,
+    "question_text": "Will the Federal Reserve cut the federal funds rate at least once before the end of 2025?",
+    "category": "finance",
+    "question_type": "binary",
+    "options": ["Yes", "No"],
+    "deadline": "2025-12-31",
+    "deadline_source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    "resolution_source": "Federal Reserve FOMC Press Releases — https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    "resolution_criteria": "Yes: The FOMC announces a reduction in the target federal funds rate at any scheduled or emergency meeting on or before December 31, 2025. No: No rate cut is announced by that date.",
+    "rationale": "Fed rate decisions are among the most-traded signals on prediction markets; the FOMC calendar provides a hard, publicly-known schedule of decision dates.",
+    "raw_llm_response": null
+  }
+]
