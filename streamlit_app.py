@@ -1,85 +1,54 @@
 """
-FR7: Prediction Market Intelligence Dashboard
+Prediction Market Discovery dashboard.
 
-Review dashboard for scored prediction market candidates. The active queue is
-re-ranked on every load so old batch-local FR6 ranks do not create duplicate
-"#1" / "#2" entries after multiple runs.
+This Streamlit app reframes the old internal review dashboard into a
+consumer-facing discovery page for active markets and emerging topics while
+keeping a few legacy helper functions that existing tests still exercise.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import re
 import subprocess
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import streamlit as st
 
-from config import LLMConfig
 from db.connection import (
-    cancel_pipeline_run,
-    create_pipeline_run,
     get_active_pipeline_run,
-    get_dashboard_repair_questions,
     get_dashboard_scored_questions,
+    get_dashboard_topics,
     get_latest_pipeline_run,
     get_pipeline_run_stages,
     init_db,
-    mark_pipeline_run_failed,
-    mark_pipeline_run_started,
-    set_question_review_status,
 )
-from validation.validator import is_salvageable_validation_flags
 
 UTC = timezone.utc
-
-CAT_COLORS = {
-    "politics": ("#60A5FA", "#1e3a5f"),
-    "finance": ("#34D399", "#064e3b"),
-    "crypto": ("#FBBF24", "#451a03"),
-    "sports": ("#F87171", "#450a0a"),
-    "health": ("#F472B6", "#500724"),
-    "technology": ("#A78BFA", "#2e1065"),
-    "environment": ("#4ADE80", "#052e16"),
-    "science": ("#38BDF8", "#082f49"),
-    "legal": ("#FB923C", "#431407"),
-    "entertainment": ("#C084FC", "#3b0764"),
-    "international": ("#818CF8", "#1e1b4b"),
-    "economics": ("#2DD4BF", "#042f2e"),
-    "business": ("#2DD4BF", "#042f2e"),
-    "energy": ("#F59E0B", "#451a03"),
-    "space": ("#38BDF8", "#082f49"),
-    "geopolitics": ("#818CF8", "#1e1b4b"),
-    "other": ("#94A3B8", "#1e293b"),
-}
-
-STATUS_META = {
-    "active": ("#60A5FA", "#1e3a5f", "Active"),
-    "selected": ("#34D399", "#064e3b", "Selected"),
-    "removed": ("#F87171", "#450a0a", "Removed"),
-    "expired": ("#FBBF24", "#451a03", "Expired"),
-    "needs_repair": ("#F97316", "#431407", "Needs Repair"),
-}
-
-COMPONENT_META = [
-    ("market_interest_score", "Market Interest", "25%"),
-    ("resolution_strength_score", "Resolution Strength", "25%"),
-    ("clarity_score", "Clarity", "20%"),
-    ("mention_velocity_score", "Mention Velocity", "10%"),
-    ("novelty_score", "Novelty", "10%"),
-    ("time_horizon_score", "Time Horizon", "5%"),
-    ("source_diversity_score", "Source Diversity", "5%"),
+DISCOVERY_CATEGORIES = [
+    "All",
+    "Politics",
+    "Economics",
+    "Technology",
+    "Sports",
+    "Entertainment",
+    "Crypto",
+    "Science",
+    "World News",
+    "Health",
+    "Other",
 ]
 
+STATUS_OPTIONS = ["All", "Active", "Ending Soon", "Expired", "Tracked"]
 SORT_OPTIONS = {
     "Score (Highest First)": lambda r: -float(r.get("total_score") or 0.0),
     "Deadline (Soonest)": lambda r: r.get("deadline") or "9999-99-99",
     "Category (A-Z)": lambda r: (r.get("category") or "").lower(),
 }
-
+DISCOVERY_SORT_OPTIONS = ["Highest Score", "Newest", "Ending Soon", "Emerging"]
 PIPELINE_STAGE_LABELS = {
     1: "FR1 Event Ingestion",
     2: "FR2 Event Clustering",
@@ -88,42 +57,70 @@ PIPELINE_STAGE_LABELS = {
     5: "FR5 Rule Validation",
     6: "FR6 Heuristic Scoring",
 }
+TOPIC_SOURCE_MAP = {
+    "Politics": ["Reuters politics desk", "official election calendars", "major polling trackers"],
+    "Economics": ["BLS and FRED releases", "company filings", "major financial press"],
+    "Technology": ["company launch blogs", "earnings calls", "developer conferences"],
+    "Sports": ["league schedules", "team injury reports", "official standings pages"],
+    "Entertainment": ["studio release calendars", "awards schedules", "trade publications"],
+    "Crypto": ["exchange listings", "ETF or policy filings", "project and regulator announcements"],
+    "Science": ["journal publications", "lab or agency updates", "conference schedules"],
+    "World News": ["major wire services", "government statements", "multilateral organizations"],
+    "Health": ["FDA calendars", "trial registries", "company and regulator updates"],
+    "Other": ["primary source announcements", "major wire services", "specialist trade press"],
+}
+ADJACENT_TOPIC_MAP = {
+    "Politics": ["campaign momentum", "regulatory follow-through", "cross-border reaction"],
+    "Economics": ["rates and inflation", "employment sentiment", "policy spillovers"],
+    "Technology": ["AI competition", "enterprise adoption", "regulatory pressure"],
+    "Sports": ["injury volatility", "title odds", "broadcast narrative"],
+    "Entertainment": ["release timing", "awards momentum", "social buzz"],
+    "Crypto": ["ETF flows", "regulatory shifts", "exchange liquidity"],
+    "Science": ["funding outlook", "commercialization", "policy adoption"],
+    "World News": ["sanctions risk", "commodity impact", "diplomatic signaling"],
+    "Health": ["trial timelines", "regulatory approval", "healthcare market response"],
+    "Other": ["policy knock-on effects", "industry sentiment", "follow-up milestones"],
+}
 
 
 def _score_color(score: float) -> str:
     if score >= 0.75:
-        return "#34D399"
+        return "#0f766e"
     if score >= 0.55:
-        return "#60A5FA"
+        return "#1d4ed8"
     if score >= 0.40:
-        return "#F97316"
-    return "#F87171"
+        return "#b45309"
+    return "#b91c1c"
 
 
-def _days_until(deadline_str: str) -> Optional[int]:
-    if not deadline_str:
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if not value:
         return None
-    for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%Y/%m/%d", "%d %B %Y"):
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+    text = str(value).strip()
+    for parser in (
+        lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")),
+        lambda s: datetime.strptime(s, "%Y-%m-%d"),
+        lambda s: datetime.strptime(s, "%B %d, %Y"),
+        lambda s: datetime.strptime(s, "%b %d, %Y"),
+        lambda s: datetime.strptime(s, "%Y/%m/%d"),
+        lambda s: datetime.strptime(s, "%d %B %Y"),
+    ):
         try:
-            deadline = datetime.strptime(deadline_str.strip(), fmt).date()
-            return (deadline - datetime.now(UTC).date()).days
+            parsed = parser(text)
+            return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
 
 
-def _days_chip(days: Optional[int]) -> str:
-    if days is None:
-        return ""
-    if days < 0:
-        return '<span class="days-chip days-urgent">Expired</span>'
-    if days == 0:
-        return '<span class="days-chip days-urgent">Today</span>'
-    if days <= 7:
-        return f'<span class="days-chip days-urgent">{days}d left</span>'
-    if days <= 30:
-        return f'<span class="days-chip days-soon">{days}d left</span>'
-    return f'<span class="days-chip days-ok">{days}d left</span>'
+def _days_until(deadline_str: str) -> Optional[int]:
+    parsed = _parse_dt(deadline_str)
+    if parsed is None:
+        return None
+    return (parsed.date() - datetime.now(UTC).date()).days
 
 
 def _effective_status(row: dict) -> str:
@@ -140,119 +137,11 @@ def _effective_status(row: dict) -> str:
 def _assign_display_ranks(rows: list[dict]) -> list[dict]:
     ranked = sorted(
         (dict(r) for r in rows),
-        key=lambda r: (-float(r.get("total_score") or 0.0), int(r.get("question_id") or 0)),
+        key=lambda r: (-float(r.get("total_score") or 0.0), int(r.get("question_id") or r.get("id") or 0)),
     )
     for rank, row in enumerate(ranked, start=1):
         row["rank"] = rank
     return ranked
-
-
-def _parse_options(raw) -> list:
-    if isinstance(raw, list):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except Exception:
-            return []
-    return []
-
-
-def _parse_flags(raw) -> list[str]:
-    if isinstance(raw, list):
-        return [str(flag) for flag in raw]
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return [str(flag) for flag in parsed]
-        except Exception:
-            return [raw]
-    return []
-
-
-def _cat_badge(category: str) -> str:
-    text, bg = CAT_COLORS.get((category or "other").lower(), CAT_COLORS["other"])
-    label = (category or "other").replace("_", " ").title()
-    return (
-        f'<span class="badge" style="color:{text};background:{bg}CC;'
-        f'border:1px solid {text}55;">{label}</span>'
-    )
-
-
-def _type_badge(question_type: str) -> str:
-    if (question_type or "").lower() == "binary":
-        return (
-            '<span class="badge" style="color:#F97316;background:#431407CC;'
-            'border:1px solid #F9731655;">Binary</span>'
-        )
-    return (
-        '<span class="badge" style="color:#A78BFA;background:#2e1065CC;'
-        'border:1px solid #A78BFA55;">Multiple Choice</span>'
-    )
-
-
-def _status_badge(status: str) -> str:
-    text, bg, label = STATUS_META.get((status or "active").lower(), STATUS_META["active"])
-    return (
-        f'<span class="badge" style="color:{text};background:{bg}CC;'
-        f'border:1px solid {text}55;">{label}</span>'
-    )
-
-
-def _rank_badge(rank: int) -> str:
-    if rank == 1:
-        style = "background:linear-gradient(135deg,#F97316,#EA580C);"
-    elif rank == 2:
-        style = "background:linear-gradient(135deg,#FB923C,#C2410C);"
-    elif rank == 3:
-        style = "background:linear-gradient(135deg,#FDBA74,#EA580C);"
-    else:
-        style = "background:#1E293B;border:1px solid #334155;"
-    return f'<div class="rank-badge" style="{style}">{rank}</div>'
-
-
-def _assign_repair_ranks(rows: list[dict]) -> list[dict]:
-    ranked = [dict(r) for r in rows]
-    for rank, row in enumerate(ranked, start=1):
-        row["rank"] = rank
-    return ranked
-
-
-def _score_circle(score: float) -> str:
-    color = _score_color(score)
-    pct = int(score * 100)
-    return (
-        f'<div class="score-circle" style="border:3px solid {color};color:{color};">'
-        f'<span class="sc-num">{pct}</span>'
-        f'<span class="sc-sub">/ 100</span>'
-        f"</div>"
-    )
-
-
-def _source_link(source: str) -> str:
-    match = re.search(r"https?://[^\s)]+", source or "")
-    if match:
-        url = match.group(0).rstrip(".,;")
-        label = urlparse(url).netloc.replace("www.", "")
-        return f'<a href="{url}" target="_blank" rel="noopener">{label}</a>'
-    source = (source or "-").strip()
-    return source[:55] + ("..." if len(source) > 55 else "")
-
-
-def _breakdown_row(label: str, weight: str, value: float) -> str:
-    color = _score_color(value)
-    pct = int(value * 100)
-    return (
-        '<div class="br-row">'
-        f'<span class="br-label">{label}</span>'
-        f'<span class="br-weight">{weight}</span>'
-        '<div class="br-track">'
-        f'<div class="br-fill" style="width:{pct}%;background:{color};"></div>'
-        '</div>'
-        f'<span class="br-val" style="color:{color};">{pct}%</span>'
-        '</div>'
-    )
 
 
 def _filter_rows(
@@ -278,33 +167,6 @@ def _filter_rows(
     return filtered
 
 
-def _filter_repair_rows(
-    rows: list[dict],
-    search: str,
-    selected_cats: list[str],
-    type_choice: str,
-    sort_choice: str,
-) -> list[dict]:
-    filtered = list(rows)
-    if search:
-        needle = search.strip().lower()
-        filtered = [r for r in filtered if needle in (r.get("question_text") or "").lower()]
-    if selected_cats:
-        filtered = [r for r in filtered if (r.get("category") or "other").lower() in selected_cats]
-    if type_choice != "All":
-        target = "binary" if type_choice == "Binary" else "multiple_choice"
-        filtered = [r for r in filtered if (r.get("question_type") or "") == target]
-
-    if sort_choice == "Category (A-Z)":
-        filtered.sort(key=lambda r: (r.get("category") or "").lower())
-    elif sort_choice == "Deadline (Soonest)":
-        filtered.sort(key=lambda r: r.get("deadline") or "9999-99-99")
-    else:
-        # Default repair queue order is already popularity-ranked from the DB.
-        filtered.sort(key=lambda r: r.get("rank", 0))
-    return filtered
-
-
 def _build_pipeline_command(
     python_executable: str,
     pipeline_path: str,
@@ -317,7 +179,6 @@ def _build_pipeline_command(
     fr3_model: str,
     fr4_model: str,
 ) -> list[str]:
-    """Build the background pipeline command for Streamlit launches."""
     command = [
         python_executable,
         pipeline_path,
@@ -335,20 +196,12 @@ def _build_pipeline_command(
         command.extend(["--fr3-limit", str(int(fr3_custom_limit))])
     elif normalized_fr3_mode == "all":
         command.append("--fr3-all")
-    normalized_mode = (fr4_mode or "default").strip().lower()
-    if normalized_mode == "custom" and custom_limit is not None:
+    normalized_fr4_mode = (fr4_mode or "default").strip().lower()
+    if normalized_fr4_mode == "custom" and custom_limit is not None:
         command.extend(["--fr4-limit", str(int(custom_limit))])
-    elif normalized_mode == "all":
+    elif normalized_fr4_mode == "all":
         command.append("--fr4-all")
     return command
-
-
-def _format_run_timestamp(value) -> str:
-    if not value:
-        return "-"
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
 
 
 def _format_stage_summary(summary) -> str:
@@ -376,16 +229,7 @@ def _pipeline_progress_value(stage_rows: list[dict]) -> float:
     return completed / len(stage_rows)
 
 
-def _model_index(options: list[str], preferred: str) -> int:
-    """Return a safe selectbox index for a preferred model name."""
-    try:
-        return options.index(preferred)
-    except ValueError:
-        return 0
-
-
 def _stage_progress_value(stage_row: dict) -> float | None:
-    """Return per-stage fractional progress when the summary exposes processed/total counts."""
     summary = stage_row.get("summary")
     if isinstance(summary, str):
         try:
@@ -410,8 +254,25 @@ def _stage_progress_value(stage_row: dict) -> float | None:
     return None
 
 
+def _stage_info_lines(stage_row: dict, run_row: dict | None) -> list[str]:
+    lines: list[str] = []
+    summary_text = _format_stage_summary(stage_row.get("summary"))
+    if summary_text:
+        lines.append(summary_text)
+
+    stage_number = int(stage_row.get("stage_number") or 0)
+    if run_row and stage_number == 3 and run_row.get("fr3_model"):
+        lines.append(f"LLM model: {run_row['fr3_model']}")
+    if run_row and stage_number == 4 and run_row.get("fr4_model"):
+        lines.append(f"LLM model: {run_row['fr4_model']}")
+
+    error_message = (stage_row.get("error_message") or "").strip()
+    if error_message:
+        lines.append(f"Error: {error_message}")
+    return lines
+
+
 def _terminate_process_tree(pid: int) -> None:
-    """Terminate a background pipeline process and its children."""
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
@@ -429,648 +290,995 @@ def _terminate_process_tree(pid: int) -> None:
     )
 
 
-def _stage_info_lines(stage_row: dict, run_row: dict | None) -> list[str]:
-    """Build the compact info-popover lines for a pipeline stage."""
-    lines: list[str] = []
-    summary_text = _format_stage_summary(stage_row.get("summary"))
-    if summary_text:
-        lines.append(summary_text)
+def _safe_json_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return [raw] if raw else []
+    return []
 
-    stage_number = int(stage_row.get("stage_number") or 0)
-    if run_row and stage_number == 3 and run_row.get("fr3_model"):
-        lines.append(f"LLM model: {run_row['fr3_model']}")
-    if run_row and stage_number == 4 and run_row.get("fr4_model"):
-        lines.append(f"LLM model: {run_row['fr4_model']}")
 
-    error_message = (stage_row.get("error_message") or "").strip()
-    if error_message:
-        lines.append(f"Error: {error_message}")
+def _format_score(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{int(round(float(value) * 100))}"
 
-    return lines
+
+def _format_percent(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value) * 100:.0f}%"
+
+
+def _format_date_label(value: Any) -> str:
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return str(value) if value else "TBD"
+    return parsed.strftime("%b %d, %Y")
+
+
+def _category_label(value: str | None) -> str:
+    normalized = (value or "Other").replace("_", " ").strip().lower()
+    if not normalized:
+        return "Other"
+
+    aliases = {
+        "finance": "Economics",
+        "business": "Economics",
+        "economics": "Economics",
+        "politics": "Politics",
+        "technology": "Technology",
+        "tech": "Technology",
+        "sports": "Sports",
+        "entertainment": "Entertainment",
+        "crypto": "Crypto",
+        "science": "Science",
+        "space": "Science",
+        "health": "Health",
+        "world news": "World News",
+        "international": "World News",
+        "geopolitics": "World News",
+        "legal": "World News",
+    }
+    return aliases.get(normalized, normalized.title() if normalized.title() in DISCOVERY_CATEGORIES else "Other")
+
+
+def _status_chip(value: str) -> str:
+    status = (value or "active").lower()
+    tone = {
+        "active": "#1d4ed8",
+        "tracked": "#7c3aed",
+        "ending soon": "#b45309",
+        "expired": "#b91c1c",
+        "valid": "#0f766e",
+        "needs review": "#b45309",
+        "demo": "#64748b",
+    }.get(status, "#475569")
+    return (
+        f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"background:{tone}15;color:{tone};font-size:12px;font-weight:600;'>{value}</span>"
+    )
+
+
+def _category_chip(value: str) -> str:
+    label = _category_label(value)
+    return (
+        "<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        "background:#e2e8f0;color:#0f172a;font-size:12px;font-weight:600;'>"
+        f"{label}</span>"
+    )
+
+
+def _type_chip(value: str) -> str:
+    label = "Multiple Choice" if (value or "").lower() == "multiple_choice" else "Binary"
+    return (
+        "<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        "background:#dbeafe;color:#1d4ed8;font-size:12px;font-weight:600;'>"
+        f"{label}</span>"
+    )
+
+
+def _linkish_source(source: str | None) -> str:
+    match = re.search(r"https?://[^\s)]+", source or "")
+    if not match:
+        return source or "Not specified"
+    url = match.group(0).rstrip(".,;")
+    label = urlparse(url).netloc.replace("www.", "")
+    return f"[{label}]({url})"
+
+
+def _topic_label_chip(value: str, tone: str = "research") -> str:
+    palette = {
+        "research": ("#7c3aed", "#f3e8ff"),
+        "watch": ("#1d4ed8", "#dbeafe"),
+    }
+    text, bg = palette.get(tone, palette["research"])
+    return (
+        f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"background:{bg};color:{text};font-size:12px;font-weight:700;'>{value}</span>"
+    )
+
+
+def _topic_focus_sentence(topic: dict) -> str:
+    summary = (topic.get("summary") or "").strip()
+    title = (topic.get("title") or "This topic").strip()
+    if summary:
+        first_sentence = summary.split(".")[0].strip()
+        if first_sentence:
+            if not first_sentence.endswith("."):
+                first_sentence += "."
+            return first_sentence
+    return f"{title} is attracting enough cross-source attention to be worth active monitoring."
+
+
+def _topic_what_is_uncertain(topic: dict) -> str:
+    category = _category_label(topic.get("category"))
+    title = topic.get("title") or "this topic"
+    return {
+        "Politics": f"Whether {title.lower()} turns into a measurable political shift or just a short-lived narrative spike.",
+        "Economics": f"Whether {title.lower()} changes the economic outlook enough to move expectations, pricing, or policy.",
+        "Technology": f"Whether {title.lower()} leads to a real launch, adoption milestone, or competitive response.",
+        "Sports": f"Whether {title.lower()} changes the competitive landscape in a way markets will quickly price in.",
+        "Entertainment": f"Whether {title.lower()} becomes a sustained audience and awards story rather than a one-cycle headline.",
+        "Crypto": f"Whether {title.lower()} becomes a concrete catalyst for price, regulation, or market structure.",
+        "Science": f"Whether {title.lower()} turns into a validated milestone with downstream commercial or policy consequences.",
+        "Health": f"Whether {title.lower()} develops into a verifiable regulatory or clinical milestone on a tradable timeline.",
+        "World News": f"Whether {title.lower()} escalates into a durable geopolitical development with clear downstream signals.",
+    }.get(category, f"What matters most is whether {title.lower()} develops into a concrete, verifiable signal rather than remaining narrative noise.")
+
+
+def _topic_watching_points(topic: dict) -> list[str]:
+    category = _category_label(topic.get("category"))
+    event_count = int(topic.get("event_count") or 0)
+    source_count = int(topic.get("source_count") or 0)
+    return [
+        f"Watch whether mention velocity stays elevated beyond the current {event_count}-event burst.",
+        f"Track whether coverage broadens beyond the current {source_count} distinct sources.",
+        {
+            "Politics": "Monitor official campaign, government, or election-calendar updates that convert narrative into a dated milestone.",
+            "Economics": "Watch for scheduled data releases, policy meetings, or filings that turn the topic into a measurable macro signal.",
+            "Technology": "Monitor launch dates, product notes, conference appearances, and executive comments for concrete confirmation.",
+            "Sports": "Track official schedules, injury reports, standings changes, and matchup implications.",
+            "Entertainment": "Watch release calendars, box-office reporting, ratings, and awards season catalysts.",
+            "Crypto": "Monitor exchange, ETF, and regulator announcements that provide unambiguous market-moving confirmation.",
+            "Science": "Track publication dates, conference readouts, and agency or lab statements.",
+            "Health": "Watch trial readouts, FDA milestones, advisory-committee calendars, and sponsor guidance.",
+            "World News": "Track sanctions, official statements, treaty votes, military posture changes, and multilateral responses.",
+        }.get(category, "Monitor official source confirmation and follow-on second-order signals before treating the topic as durable."),
+    ]
+
+
+def _topic_key_dates(topic: dict) -> list[str]:
+    latest = _parse_dt(topic.get("latest_event_at"))
+    if latest is None:
+        return ["Near-term follow-up timing is still unclear."]
+    next_week = (latest + timedelta(days=7)).strftime("%b %d")
+    next_month = (latest + timedelta(days=30)).strftime("%b %d")
+    return [
+        f"Near-term follow-up window: by {next_week}",
+        f"If the story is durable, expect a clearer milestone before {next_month}",
+    ]
+
+
+def _topic_data_sources(topic: dict) -> list[str]:
+    category = _category_label(topic.get("category"))
+    return TOPIC_SOURCE_MAP.get(category, TOPIC_SOURCE_MAP["Other"])
+
+
+def _topic_adjacent_topics(topic: dict) -> list[str]:
+    category = _category_label(topic.get("category"))
+    return ADJACENT_TOPIC_MAP.get(category, ADJACENT_TOPIC_MAP["Other"])
+
+
+def enrich_topic_rows(topics: list[dict]) -> list[dict]:
+    enriched = []
+    for topic in topics:
+        item = dict(topic)
+        item["focus_sentence"] = _topic_focus_sentence(item)
+        item["what_is_uncertain"] = _topic_what_is_uncertain(item)
+        item["watching_points"] = _topic_watching_points(item)
+        item["key_dates"] = _topic_key_dates(item)
+        item["data_sources"] = _topic_data_sources(item)
+        item["adjacent_topics"] = _topic_adjacent_topics(item)
+        enriched.append(item)
+    return enriched
+
+
+def get_demo_markets() -> list[dict]:
+    now = datetime.now(UTC)
+    return [
+        {
+            "id": "demo-1",
+            "question": "Will the SEC approve a spot Ethereum ETF before July 31, 2026?",
+            "category": "Crypto",
+            "question_type": "binary",
+            "total_score": 0.92,
+            "deadline": (now + timedelta(days=52)).strftime("%Y-%m-%d"),
+            "deadline_source": "Regulatory filing calendar and issuer updates",
+            "resolution_source": "SEC announcements and issuer filings",
+            "resolution_criteria": "Resolves Yes if the SEC approves at least one spot Ethereum ETF before the deadline.",
+            "rationale": "Crypto policy remains one of the most watched catalysts across retail prediction markets.",
+            "score_breakdown": {
+                "Market Interest": 0.96,
+                "Resolution Strength": 0.91,
+                "Clarity": 0.90,
+                "Novelty": 0.81,
+            },
+            "validation_status": "Valid",
+            "warnings": [],
+            "created_at": (now - timedelta(days=1)).isoformat(),
+        },
+        {
+            "id": "demo-2",
+            "question": "Will OpenAI release GPT-6 publicly before September 30, 2026?",
+            "category": "Technology",
+            "question_type": "binary",
+            "total_score": 0.84,
+            "deadline": (now + timedelta(days=113)).strftime("%Y-%m-%d"),
+            "deadline_source": "Company launch windows and public release statements",
+            "resolution_source": "OpenAI product announcements",
+            "resolution_criteria": "Resolves Yes if OpenAI publicly launches GPT-6 to paying or free users before the deadline.",
+            "rationale": "Major AI model launches drive outsized interest and broad coverage across consumer tech audiences.",
+            "score_breakdown": {
+                "Market Interest": 0.90,
+                "Resolution Strength": 0.82,
+                "Clarity": 0.86,
+                "Novelty": 0.70,
+            },
+            "validation_status": "Valid",
+            "warnings": ["Release naming could change and should be monitored."],
+            "created_at": (now - timedelta(days=3)).isoformat(),
+        },
+        {
+            "id": "demo-3",
+            "question": "Which studio will win Best Picture at the 2027 Oscars?",
+            "category": "Entertainment",
+            "question_type": "multiple_choice",
+            "total_score": 0.76,
+            "deadline": (now + timedelta(days=300)).strftime("%Y-%m-%d"),
+            "deadline_source": "Academy Awards schedule",
+            "resolution_source": "The Academy official winners list",
+            "resolution_criteria": "Resolves to the studio behind the film that wins Best Picture at the 2027 Oscars.",
+            "rationale": "Awards-season narratives create sticky recurring interest with clear public resolution.",
+            "score_breakdown": {
+                "Market Interest": 0.74,
+                "Resolution Strength": 0.88,
+                "Clarity": 0.78,
+                "Novelty": 0.63,
+            },
+            "validation_status": "Needs Review",
+            "warnings": ["Candidate studios may need normalization closer to the ceremony."],
+            "created_at": (now - timedelta(days=5)).isoformat(),
+        },
+    ]
+
+
+def get_demo_topics() -> list[dict]:
+    now = datetime.now(UTC)
+    topics = [
+        {
+            "id": "topic-1",
+            "title": "AI product launches accelerate",
+            "summary": "A cluster of product rumors, enterprise deals, and benchmark chatter is driving new AI market ideas.",
+            "category": "Technology",
+            "event_count": 14,
+            "source_count": 9,
+            "suggested_market_count": 6,
+            "avg_candidate_score": 0.83,
+            "latest_event_at": (now - timedelta(hours=8)).isoformat(),
+        },
+        {
+            "id": "topic-2",
+            "title": "Election polling volatility",
+            "summary": "Polling swings and campaign announcements are creating fresh election-related market opportunities.",
+            "category": "Politics",
+            "event_count": 11,
+            "source_count": 7,
+            "suggested_market_count": 5,
+            "avg_candidate_score": 0.79,
+            "latest_event_at": (now - timedelta(days=1)).isoformat(),
+        },
+        {
+            "id": "topic-3",
+            "title": "Breakthrough biotech readouts",
+            "summary": "Clinical milestones and FDA timelines are surfacing a steady stream of health and science markets.",
+            "category": "Health",
+            "event_count": 8,
+            "source_count": 6,
+            "suggested_market_count": 4,
+            "avg_candidate_score": 0.74,
+            "latest_event_at": (now - timedelta(days=2)).isoformat(),
+        },
+    ]
+    for topic in topics:
+        topic["trend_score"] = compute_trend_score(topic)
+    return enrich_topic_rows(topics)
+
+
+def normalize_market_rows(rows: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for row in rows:
+        warnings = _safe_json_list(row.get("validation_flags") or row.get("warnings"))
+        validation_status = row.get("validation_status")
+        if not validation_status:
+            is_valid = row.get("is_valid")
+            if is_valid is True:
+                validation_status = "Valid"
+            elif warnings:
+                validation_status = "Needs Review"
+            else:
+                validation_status = "Unknown"
+
+        score_breakdown = {
+            "Market Interest": float(row.get("market_interest_score") or 0.0),
+            "Resolution Strength": float(row.get("resolution_strength_score") or 0.0),
+            "Clarity": float(row.get("clarity_score") or 0.0),
+            "Mention Velocity": float(row.get("mention_velocity_score") or 0.0),
+            "Novelty": float(row.get("novelty_score") or 0.0),
+            "Time Horizon": float(row.get("time_horizon_score") or 0.0),
+            "Source Diversity": float(row.get("source_diversity_score") or 0.0),
+        }
+        market = {
+            "id": row.get("question_id") or row.get("id"),
+            "question": row.get("question") or row.get("question_text") or "Untitled market",
+            "question_text": row.get("question") or row.get("question_text") or "Untitled market",
+            "category": _category_label(row.get("category")),
+            "question_type": row.get("question_type") or "binary",
+            "total_score": float(row.get("total_score") or 0.0),
+            "deadline": row.get("deadline"),
+            "deadline_source": row.get("deadline_source") or "Not provided",
+            "resolution_source": row.get("resolution_source") or "Not provided",
+            "resolution_criteria": row.get("resolution_criteria") or "Resolution criteria not available yet.",
+            "rationale": row.get("rationale") or "This market is drawing attention because it sits at the intersection of news momentum and clear resolution.",
+            "score_breakdown": score_breakdown,
+            "validation_status": validation_status,
+            "warnings": warnings,
+            "created_at": row.get("question_created_at") or row.get("created_at"),
+            "review_status": row.get("review_status"),
+        }
+        market["status"] = _market_status(market)
+        normalized.append(market)
+    return normalized
+
+
+def compute_trend_score(topic: dict) -> float:
+    event_count = float(topic.get("event_count") or 0.0)
+    source_count = float(topic.get("source_count") or 0.0)
+    suggested_market_count = float(topic.get("suggested_market_count") or 0.0)
+    avg_candidate_score = float(topic.get("avg_candidate_score") or 0.0)
+
+    latest_event_at = _parse_dt(topic.get("latest_event_at"))
+    if latest_event_at is None:
+        recency_points = 0.0
+    else:
+        age_days = max((datetime.now(UTC) - latest_event_at).total_seconds() / 86400, 0.0)
+        recency_points = max(0.0, 25.0 - min(age_days, 25.0))
+
+    trend_score = (
+        min(event_count, 20.0) * 2.2
+        + min(source_count, 15.0) * 2.0
+        + min(suggested_market_count, 10.0) * 2.4
+        + avg_candidate_score * 24.0
+        + recency_points
+    )
+    return round(trend_score, 1)
+
+
+def compute_summary_metrics(markets: list[dict], topics: list[dict]) -> dict:
+    now = datetime.now(UTC)
+    active_markets = [m for m in markets if _market_status(m) != "Expired"]
+    avg_score = sum(float(m.get("total_score") or 0.0) for m in markets) / len(markets) if markets else 0.0
+    new_this_week = sum(
+        1
+        for market in markets
+        if (_parse_dt(market.get("created_at")) or now - timedelta(days=3650)) >= now - timedelta(days=7)
+    )
+    return {
+        "Active Markets": len(active_markets),
+        "Emerging Topics": len(topics),
+        "Average Market Score": f"{avg_score * 100:.1f}",
+        "New This Week": new_this_week,
+    }
+
+
+def _market_status(market: dict) -> str:
+    if str(market.get("id")) in st.session_state.get("tracked_markets", set()):
+        return "Tracked"
+    days = _days_until(str(market.get("deadline") or ""))
+    if days is not None and days < 0:
+        return "Expired"
+    if days is not None and days <= 14:
+        return "Ending Soon"
+    return "Active"
+
+
+def filter_markets(markets: list[dict], filters: dict) -> list[dict]:
+    filtered = list(markets)
+    search_text = (filters.get("search_text") or "").strip().lower()
+    if search_text:
+        filtered = [
+            market
+            for market in filtered
+            if search_text in market.get("question", "").lower()
+            or search_text in market.get("rationale", "").lower()
+            or search_text in market.get("category", "").lower()
+        ]
+
+    category = filters.get("category")
+    if category and category != "All":
+        filtered = [market for market in filtered if _category_label(market.get("category")) == category]
+
+    explorer_category = filters.get("explorer_category")
+    if explorer_category and explorer_category != "All":
+        filtered = [market for market in filtered if _category_label(market.get("category")) == explorer_category]
+
+    question_type = filters.get("question_type")
+    if question_type and question_type != "All":
+        normalized = "multiple_choice" if question_type == "Multiple Choice" else "binary"
+        filtered = [market for market in filtered if market.get("question_type") == normalized]
+
+    min_score = float(filters.get("minimum_score") or 0.0)
+    filtered = [market for market in filtered if float(market.get("total_score") or 0.0) >= min_score]
+
+    status = filters.get("status")
+    if status and status != "All":
+        filtered = [market for market in filtered if _market_status(market) == status]
+
+    return sort_markets(filtered, filters.get("sort_order", "Highest Score"))
+
+
+def sort_markets(markets: list[dict], sort_order: str) -> list[dict]:
+    def deadline_key(market: dict) -> tuple[int, int]:
+        days = _days_until(str(market.get("deadline") or ""))
+        if days is None:
+            return (1, 999999)
+        if days < 0:
+            return (2, abs(days))
+        return (0, days)
+
+    def created_key(market: dict) -> float:
+        parsed = _parse_dt(market.get("created_at"))
+        return parsed.timestamp() if parsed else 0.0
+
+    def emerging_key(market: dict) -> tuple[float, float, float]:
+        return (
+            -float(market.get("total_score") or 0.0),
+            -created_key(market),
+            deadline_key(market)[1],
+        )
+
+    if sort_order == "Newest":
+        return sorted(markets, key=lambda m: (-created_key(m), -float(m.get("total_score") or 0.0)))
+    if sort_order == "Ending Soon":
+        return sorted(markets, key=lambda m: (deadline_key(m), -float(m.get("total_score") or 0.0)))
+    if sort_order == "Emerging":
+        return sorted(markets, key=emerging_key)
+    return sorted(
+        markets,
+        key=lambda m: (
+            -float(m.get("total_score") or 0.0),
+            deadline_key(m),
+            -created_key(m),
+        ),
+    )
+
+
+def initialize_session_state() -> None:
+    if "tracked_markets" not in st.session_state:
+        st.session_state.tracked_markets = set()
+    if "saved_topics" not in st.session_state:
+        st.session_state.saved_topics = set()
+    if "category_explorer" not in st.session_state:
+        st.session_state.category_explorer = "All"
+
+
+def load_dashboard_data() -> dict:
+    data = {
+        "markets": [],
+        "topics": [],
+        "using_demo": False,
+        "db_warning": None,
+        "source_label": "Live data",
+        "pipeline_run": None,
+        "pipeline_stages": [],
+    }
+
+    try:
+        init_db()
+        raw_market_rows = [dict(row) for row in get_dashboard_scored_questions()]
+        raw_topic_rows = [dict(row) for row in get_dashboard_topics()]
+        data["pipeline_run"] = get_active_pipeline_run() or get_latest_pipeline_run()
+        if data["pipeline_run"]:
+            data["pipeline_stages"] = get_pipeline_run_stages(int(data["pipeline_run"]["id"]))
+
+        markets = normalize_market_rows(raw_market_rows)
+        topics = [dict(row) for row in raw_topic_rows]
+        for topic in topics:
+            topic.setdefault("category", _category_label(topic.get("category") or topic.get("event_type") or "Other"))
+            topic["trend_score"] = compute_trend_score(topic)
+        topics = enrich_topic_rows(topics)
+        data["markets"] = markets
+        data["topics"] = topics
+
+        if not markets:
+            data["db_warning"] = "No scored candidates are available yet. Showing demo discovery data until the pipeline produces markets."
+            data["markets"] = get_demo_markets()
+            data["topics"] = get_demo_topics()
+            data["using_demo"] = True
+            data["source_label"] = "Demo data"
+    except Exception as exc:
+        data["db_warning"] = f"Database connection failed. Showing demo discovery data instead. Details: {exc}"
+        data["markets"] = get_demo_markets()
+        data["topics"] = get_demo_topics()
+        data["using_demo"] = True
+        data["source_label"] = "Demo data"
+
+    return data
+
+
+def render_header() -> None:
+    st.markdown(
+        """
+        <div class="hero-shell">
+          <div class="eyebrow">Prediction Market Discovery</div>
+          <h1>Prediction Market Discovery</h1>
+          <p>Track the market questions worth following now, and separate out emerging topics that still belong in a research watchlist.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_summary_metrics(data: dict) -> None:
+    metrics = compute_summary_metrics(data["markets"], data["topics"])
+    columns = st.columns(4)
+    for column, (label, value) in zip(columns, metrics.items()):
+        with column:
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                  <div class="metric-label">{label}</div>
+                  <div class="metric-value">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    if data.get("db_warning"):
+        st.warning(data["db_warning"])
+
+
+def render_sidebar_filters(data: dict) -> dict:
+    with st.sidebar:
+        st.markdown("## Discover")
+        st.caption(f"Source: {data.get('source_label', 'Live data')}")
+        search_text = st.text_input("Search", placeholder="Search markets, categories, or themes")
+        category = st.selectbox("Category", DISCOVERY_CATEGORIES, index=0)
+        question_type = st.selectbox("Question Type", ["All", "Binary", "Multiple Choice"], index=0)
+        minimum_score = st.slider("Minimum Score", min_value=0, max_value=100, value=40, step=5) / 100
+        status = st.selectbox("Status", STATUS_OPTIONS, index=0)
+        sort_order = st.selectbox("Sort Order", DISCOVERY_SORT_OPTIONS, index=0)
+
+    return {
+        "search_text": search_text,
+        "category": category,
+        "question_type": question_type,
+        "minimum_score": minimum_score,
+        "status": status,
+        "sort_order": sort_order,
+        "explorer_category": st.session_state.get("category_explorer", "All"),
+    }
+
+
+def render_topic_card(topic: dict) -> None:
+    saved_topics = st.session_state.saved_topics
+    is_saved = str(topic.get("id")) in saved_topics
+    container = st.container(border=True)
+    with container:
+        top_left, top_right = st.columns([5, 1])
+        with top_left:
+            st.markdown(
+                f"### {topic.get('title') or topic.get('summary') or 'Emerging topic'}\n\n"
+                f"{topic.get('focus_sentence') or topic.get('summary') or 'This topic is starting to generate fresh market ideas.'}"
+            )
+        with top_right:
+            st.markdown(
+                f"""
+                <div style="text-align:right;">
+                  <div class="trend-label">Trend Score</div>
+                  <div class="trend-value">{topic.get('trend_score', 0):.1f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            f"{_category_chip(topic.get('category'))} {_topic_label_chip('Research Signal Only')} {_topic_label_chip('No Market Listed Yet', 'watch')}",
+            unsafe_allow_html=True,
+        )
+        stat_cols = st.columns(3)
+        stat_cols[0].metric("Events", int(topic.get("event_count") or 0))
+        stat_cols[1].metric("Sources", int(topic.get("source_count") or 0))
+        stat_cols[2].metric("Coverage", int(topic.get("suggested_market_count") or 0))
+
+        st.markdown(
+            f"""
+            <div class="example-callout">
+              <strong>What is still uncertain:</strong> {topic.get("what_is_uncertain")}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Research Brief"):
+            st.markdown("**Watching Points**")
+            for item in topic.get("watching_points", []):
+                st.markdown(f"- {item}")
+
+            st.markdown("**Key Dates**")
+            for item in topic.get("key_dates", []):
+                st.markdown(f"- {item}")
+
+            st.markdown("**Data Sources To Check**")
+            for item in topic.get("data_sources", []):
+                st.markdown(f"- {item}")
+
+            st.markdown("**Adjacent Topics**")
+            for item in topic.get("adjacent_topics", []):
+                st.markdown(f"- {item}")
+
+        action_label = "Saved" if is_saved else "Save Topic"
+        if st.button(action_label, key=f"save-topic-{topic.get('id')}", disabled=is_saved):
+            saved_topics.add(str(topic.get("id")))
+            st.rerun()
+
+
+def render_emerging_topics(data: dict, filters: dict) -> None:
+    st.markdown("## Emerging Topics")
+    st.caption("Research intelligence only: topics with momentum but no listed market yet.")
+    topics = list(data["topics"])
+
+    search_text = (filters.get("search_text") or "").strip().lower()
+    if search_text:
+        topics = [
+            topic
+            for topic in topics
+            if search_text in (topic.get("title") or "").lower()
+            or search_text in (topic.get("summary") or "").lower()
+            or search_text in (topic.get("what_is_uncertain") or "").lower()
+        ]
+
+    category = filters.get("category")
+    if category and category != "All":
+        topics = [topic for topic in topics if _category_label(topic.get("category")) == category]
+
+    topics.sort(key=lambda topic: (-float(topic.get("trend_score") or 0.0), -(topic.get("event_count") or 0)))
+
+    if not topics:
+        st.info("No emerging topics match the current filters yet.")
+        return
+
+    for topic in topics[:6]:
+        render_topic_card(topic)
+
+
+def render_category_explorer(data: dict, filters: dict) -> None:
+    st.markdown("## Category Explorer")
+    available_counts: dict[str, int] = {}
+    for market in data["markets"]:
+        label = _category_label(market.get("category"))
+        available_counts[label] = available_counts.get(label, 0) + 1
+
+    option_labels = []
+    for label in DISCOVERY_CATEGORIES:
+        if label == "All":
+            option_labels.append("All")
+        else:
+            option_labels.append(f"{label} ({available_counts.get(label, 0)})")
+
+    current = st.session_state.get("category_explorer", "All")
+    current_index = DISCOVERY_CATEGORIES.index(current) if current in DISCOVERY_CATEGORIES else 0
+    selected_option = st.selectbox(
+        "Browse categories",
+        option_labels,
+        index=current_index,
+        key="category_explorer_select",
+    )
+    selected_category = selected_option.split(" (")[0]
+    st.session_state.category_explorer = selected_category
+
+    if selected_category == "All":
+        st.caption("Browse the full market landscape or narrow the discovery feed to a category.")
+    else:
+        st.caption(f"Showing discovery results for {selected_category}.")
+
+
+def render_market_card(market: dict) -> None:
+    tracked_markets = st.session_state.tracked_markets
+    market_id = str(market.get("id"))
+    days_left = _days_until(str(market.get("deadline") or ""))
+    deadline_label = _format_date_label(market.get("deadline"))
+    if days_left is None:
+        deadline_suffix = "TBD"
+    elif days_left < 0:
+        deadline_suffix = "Expired"
+    elif days_left == 0:
+        deadline_suffix = "Ends today"
+    else:
+        deadline_suffix = f"{days_left} days left"
+
+    with st.container(border=True):
+        header_left, header_right = st.columns([6, 1.3])
+        with header_left:
+            st.markdown(f"### {market.get('question')}")
+            st.markdown(
+                f"{_category_chip(market.get('category'))} {_type_chip(market.get('question_type'))} "
+                f"{_status_chip(market.get('validation_status') or 'Unknown')} {_topic_label_chip('Trackable Now', 'watch')}",
+                unsafe_allow_html=True,
+            )
+        with header_right:
+            st.metric("Score", _format_score(market.get("total_score")))
+
+        meta_cols = st.columns(4)
+        meta_cols[0].markdown(f"**Deadline**  \n{deadline_label}")
+        meta_cols[1].markdown(f"**Timing**  \n{deadline_suffix}")
+        meta_cols[2].markdown(f"**Resolution Source**  \n{market.get('resolution_source') or 'Not specified'}")
+        meta_cols[3].markdown(f"**Category**  \n{_category_label(market.get('category'))}")
+
+        st.markdown(
+            f"""
+            <div class="rationale-box">
+              <strong>Why traders care:</strong> {market.get("rationale")}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        action_cols = st.columns([1, 6])
+        with action_cols[0]:
+            if market_id in tracked_markets:
+                st.button("Tracking", key=f"track-{market_id}", disabled=True, use_container_width=True)
+            else:
+                if st.button("Track Market", key=f"track-{market_id}", use_container_width=True):
+                    tracked_markets.add(market_id)
+                    st.rerun()
+
+        with st.expander("View Details"):
+            st.markdown(f"**Resolution Criteria**  \n{market.get('resolution_criteria')}")
+            st.markdown(f"**Deadline Source**  \n{market.get('deadline_source')}")
+            st.markdown(f"**Generated Rationale**  \n{market.get('rationale')}")
+            st.markdown(f"**Resolution Source Link**  \n{_linkish_source(market.get('resolution_source'))}")
+
+            st.markdown("**Score Breakdown**")
+            for label, value in market.get("score_breakdown", {}).items():
+                st.progress(min(max(float(value), 0.0), 1.0), text=f"{label}: {_format_percent(value)}")
+
+            warnings = market.get("warnings") or []
+            if warnings:
+                st.markdown("**Warnings**")
+                for warning in warnings:
+                    st.warning(str(warning))
+            else:
+                st.caption("No warnings recorded for this market.")
+
+
+def render_active_markets(data: dict, filters: dict) -> None:
+    st.markdown("## Active Markets")
+    st.caption("Highest-conviction market questions worth tracking right now, ordered by score and near-term relevance.")
+    filters = dict(filters)
+    filters["explorer_category"] = st.session_state.get("category_explorer", "All")
+    markets = filter_markets(data["markets"], filters)
+
+    if not data["markets"]:
+        st.markdown(
+            """
+            <div class="empty-state-card">
+              <h3>No markets yet</h3>
+              <p>Markets will appear here after the pipeline runs and scores candidate questions.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    if not markets:
+        st.markdown(
+            """
+            <div class="empty-state-card">
+              <h3>No markets match these filters</h3>
+              <p>Try broadening the search, lowering the score threshold, or switching categories.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.caption(f"{len(markets)} markets shown")
+    for market in markets:
+        render_market_card(market)
+
+
+def render_saved_items_sidebar() -> None:
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("## Saved Items")
+        tracked = sorted(st.session_state.tracked_markets)
+        saved_topics = sorted(st.session_state.saved_topics)
+
+        if not tracked and not saved_topics:
+            st.caption("Track markets or save topics to keep a lightweight watchlist here.")
+        else:
+            if tracked:
+                st.markdown("**Tracked Markets**")
+                for item in tracked:
+                    st.caption(f"Market #{item}")
+            if saved_topics:
+                st.markdown("**Saved Topics**")
+                for item in saved_topics:
+                    st.caption(f"Topic #{item}")
+
+        if st.button("Clear Saved Items", use_container_width=True):
+            st.session_state.tracked_markets = set()
+            st.session_state.saved_topics = set()
+            st.rerun()
+
+
+def render_admin_tools_collapsed() -> None:
+    with st.sidebar:
+        with st.expander("Admin Tools", expanded=False):
+            st.caption("Hidden by default so the dashboard stays consumer-facing.")
+            try:
+                run_row = get_active_pipeline_run() or get_latest_pipeline_run()
+                if not run_row:
+                    st.write("No pipeline run metadata available.")
+                    return
+
+                st.write(f"Latest run: #{run_row.get('id')}")
+                st.write(f"Status: {run_row.get('status', 'unknown')}")
+                stages = get_pipeline_run_stages(int(run_row["id"]))
+                if stages:
+                    st.progress(_pipeline_progress_value(stages))
+                    for stage in stages:
+                        label = PIPELINE_STAGE_LABELS.get(stage.get("stage_number"), f"Stage {stage.get('stage_number')}")
+                        lines = _stage_info_lines(stage, run_row)
+                        st.markdown(f"**{label}**")
+                        st.caption(" | ".join(lines) if lines else stage.get("status", "pending"))
+            except Exception:
+                st.write("Admin metadata is unavailable in demo mode.")
 
 
 def _inject_css() -> None:
     st.markdown(
         """
-<style>
-html, body, [class*="css"] { font-family: "Segoe UI", "Helvetica Neue", sans-serif !important; }
-#MainMenu, footer { visibility: hidden; }
-.main { background: #0F1117; }
-.main .block-container { padding: 2rem 2.5rem 4rem 2.5rem; max-width: 1300px; }
-section[data-testid="stSidebar"] { background: #14161E !important; border-right: 1px solid #1E2535; }
-
-.app-title { font-size: 30px; font-weight: 800; color: #F1F5F9; letter-spacing: -0.8px; line-height: 1.15; margin: 0; }
-.app-title span { color: #F97316; }
-.app-subtitle { font-size: 15px; color: #94A3B8; margin-top: 6px; font-weight: 400; line-height: 1.6; }
-
-.stat-grid { display: flex; gap: 12px; margin: 22px 0 30px 0; }
-.stat-card { flex: 1; background: #14161E; border: 1px solid #1E2535; border-radius: 14px; padding: 18px 20px; }
-.stat-value { font-size: 30px; font-weight: 800; color: #F1F5F9; line-height: 1; }
-.stat-label { font-size: 11px; color: #64748B; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 6px; }
-
-.q-card { background: #14161E; border: 1px solid #1E2535; border-radius: 16px; padding: 24px 26px 20px 26px; margin-bottom: 10px; }
-.q-header { display: flex; align-items: flex-start; gap: 14px; }
-.rank-badge { min-width: 36px; height: 36px; border-radius: 50%; color: #FFFFFF; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px; }
-.q-text { font-size: 17px; font-weight: 600; color: #F1F5F9; line-height: 1.5; flex: 1; }
-.score-circle { min-width: 54px; height: 54px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; flex-shrink: 0; line-height: 1; }
-.sc-num { font-size: 17px; font-weight: 800; }
-.sc-sub { font-size: 9px; font-weight: 500; opacity: 0.6; margin-top: 1px; }
-.badges-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0 50px; }
-.badge { font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 20px; white-space: nowrap; }
-.score-bar-wrap { margin: 16px 0 12px 0; background: #1E293B; border-radius: 6px; height: 5px; overflow: hidden; }
-.score-bar-fill { height: 100%; border-radius: 6px; }
-.q-meta { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13.5px; color: #64748B; margin-top: 4px; align-items: center; }
-.meta-item a { color: #F97316; text-decoration: none; }
-.days-chip { font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 10px; margin-left: 5px; }
-.days-urgent { background: #450a0a; color: #F87171; border: 1px solid #F8717140; }
-.days-soon { background: #1c1400; color: #FBBF24; border: 1px solid #FBBF2440; }
-.days-ok { background: #052e16; color: #4ADE80; border: 1px solid #4ADE8040; }
-.option-pill { font-size: 13px; font-weight: 500; padding: 5px 14px; border-radius: 20px; background: #1E293B; border: 1px solid #334155; color: #CBD5E1; }
-
-.results-bar { font-size: 14px; color: #64748B; font-weight: 500; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #1E2535; }
-.results-bar strong { color: #94A3B8; }
-.empty-state { text-align: center; padding: 70px 20px; }
-.empty-title { font-size: 22px; font-weight: 700; color: #94A3B8; margin-bottom: 10px; }
-.empty-sub { font-size: 15px; color: #475569; line-height: 1.7; max-width: 420px; margin: 0 auto; }
-
-.br-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #475569; margin: 0 0 14px 0; }
-.br-row { display: flex; align-items: center; gap: 12px; margin-bottom: 11px; }
-.br-label { font-size: 13px; color: #CBD5E1; min-width: 175px; flex-shrink: 0; font-weight: 500; }
-.br-weight { font-size: 11px; color: #475569; width: 32px; text-align: right; flex-shrink: 0; font-weight: 600; }
-.br-track { flex: 1; background: #1E293B; border-radius: 5px; height: 9px; overflow: hidden; }
-.br-fill { height: 100%; border-radius: 5px; }
-.br-val { font-size: 13px; font-weight: 700; width: 38px; text-align: right; flex-shrink: 0; }
-
-.llm-grid { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 4px 0; }
-.llm-chip { font-size: 13px; padding: 8px 14px; border-radius: 10px; background: #1A1D27; border: 1px solid #2D3348; color: #94A3B8; }
-.llm-label { font-size: 10px; color: #475569; display: block; margin-bottom: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-.detail-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.9px; color: #475569; margin: 20px 0 8px 0; }
-.detail-text { font-size: 14px; color: #CBD5E1; line-height: 1.7; padding: 14px 16px; background: #1A1D27; border-radius: 10px; border: 1px solid #2D3348; }
-.detail-text.muted { color: #94A3B8; font-style: italic; }
-</style>
+        <style>
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(14,165,233,0.16), transparent 30%),
+                radial-gradient(circle at top right, rgba(250,204,21,0.15), transparent 25%),
+                linear-gradient(180deg, #f8fafc 0%, #eff6ff 50%, #f8fafc 100%);
+        }
+        .main .block-container {
+            max-width: 1400px;
+            padding-top: 2rem;
+            padding-bottom: 4rem;
+        }
+        .hero-shell {
+            padding: 1.25rem 0 1.75rem 0;
+        }
+        .hero-shell .eyebrow {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(29, 78, 216, 0.10);
+            color: #1d4ed8;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 14px;
+        }
+        .hero-shell h1 {
+            margin: 0;
+            color: #0f172a;
+            font-size: 2.6rem;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+        }
+        .hero-shell p {
+            margin: 10px 0 0 0;
+            color: #334155;
+            font-size: 1.05rem;
+            max-width: 760px;
+            line-height: 1.7;
+        }
+        .metric-card {
+            background: rgba(255,255,255,0.78);
+            border: 1px solid rgba(148,163,184,0.25);
+            border-radius: 20px;
+            padding: 18px 20px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+            backdrop-filter: blur(8px);
+        }
+        .metric-label {
+            color: #475569;
+            font-size: 0.85rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .metric-value {
+            color: #0f172a;
+            font-size: 2rem;
+            font-weight: 800;
+            margin-top: 6px;
+        }
+        .example-callout {
+            margin-top: 12px;
+            padding: 12px 14px;
+            border-radius: 16px;
+            background: #fff7ed;
+            color: #7c2d12;
+            border: 1px solid #fdba74;
+        }
+        .rationale-box {
+            margin-top: 14px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.72);
+            border: 1px solid rgba(148,163,184,0.25);
+            color: #334155;
+        }
+        .empty-state-card {
+            padding: 28px;
+            border-radius: 24px;
+            background: rgba(255,255,255,0.78);
+            border: 1px dashed rgba(148,163,184,0.6);
+            text-align: center;
+            color: #475569;
+        }
+        .empty-state-card h3 {
+            color: #0f172a;
+            margin-bottom: 8px;
+        }
+        .trend-label {
+            color: #64748b;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+        .trend-value {
+            color: #0f172a;
+            font-size: 1.75rem;
+            font-weight: 800;
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
-
-
-def _render_card(row: dict) -> None:
-    rank = int(row["rank"])
-    score = float(row.get("total_score") or 0.0)
-    color = _score_color(score)
-    pct = int(score * 100)
-    days = _days_until((row.get("deadline") or "").strip())
-    effective_status = row.get("effective_status", "active")
-
-    options = _parse_options(row.get("options"))
-    options_html = ""
-    if options:
-        pills = "".join(f'<span class="option-pill">{option}</span>' for option in options)
-        options_html = f'<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;">{pills}</div>'
-
-    status_html = ""
-    if effective_status != "active":
-        status_html = _status_badge(effective_status)
-
-    st.markdown(
-        f"""
-<div class="q-card">
-  <div class="q-header">
-    {_rank_badge(rank)}
-    <div class="q-text">{row.get('question_text', '')}</div>
-    {_score_circle(score)}
-  </div>
-  <div class="badges-row">
-    {_cat_badge(row.get('category', 'other'))}
-    {_type_badge(row.get('question_type', 'binary'))}
-    {status_html}
-  </div>
-  <div class="score-bar-wrap">
-    <div class="score-bar-fill" style="width:{pct}%;background:{color};"></div>
-  </div>
-  <div class="q-meta">
-    <span class="meta-item">Deadline: {row.get('deadline', '-') or '-'}{_days_chip(days)}</span>
-    <span class="meta-item">Source: {_source_link(row.get('resolution_source', ''))}</span>
-  </div>
-  {options_html}
-</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Score breakdown and details", expanded=False):
-        bars = '<div class="br-section-title">Score Components</div>'
-        for key, label, weight in COMPONENT_META:
-            bars += _breakdown_row(label, weight, float(row.get(key) or 0.0))
-
-        res_conf = float(row.get("resolution_confidence") or 0.0)
-        src_ind = float(row.get("source_independence") or 0.0)
-        timing = float(row.get("timing_reliability") or 0.0)
-        chips = f"""
-<div class="llm-grid">
-  <div class="llm-chip"><span class="llm-label">Resolution Confidence</span><strong style="color:{_score_color(res_conf)};">{int(res_conf*100)}%</strong></div>
-  <div class="llm-chip"><span class="llm-label">Source Independence</span><strong style="color:{_score_color(src_ind)};">{int(src_ind*100)}%</strong></div>
-  <div class="llm-chip"><span class="llm-label">Timing Reliability</span><strong style="color:{_score_color(timing)};">{int(timing*100)}%</strong></div>
-</div>
-        """
-        st.markdown(bars + chips, unsafe_allow_html=True)
-
-        resolution_criteria = (row.get("resolution_criteria") or "").strip()
-        rationale = (row.get("rationale") or "").strip()
-        if resolution_criteria:
-            st.markdown(
-                '<div class="detail-header">Resolution Criteria</div>'
-                f'<div class="detail-text">{resolution_criteria}</div>',
-                unsafe_allow_html=True,
-            )
-        if rationale:
-            st.markdown(
-                '<div class="detail-header">Why This Market?</div>'
-                f'<div class="detail-text muted">{rationale}</div>',
-                unsafe_allow_html=True,
-            )
-
-
-def _render_actions(row: dict, status: str) -> None:
-    question_id = int(row["question_id"])
-    if status == "active":
-        left, mid, _ = st.columns([1, 1, 6])
-        with left:
-            if st.button("Select", key=f"select_{question_id}", use_container_width=True):
-                set_question_review_status(question_id, "selected")
-                st.rerun()
-        with mid:
-            if st.button("Remove", key=f"remove_{question_id}", use_container_width=True):
-                set_question_review_status(question_id, "removed")
-                st.rerun()
-        return
-
-    if status in {"selected", "removed"}:
-        left, _ = st.columns([1, 7])
-        with left:
-            if st.button("Restore", key=f"restore_{question_id}", use_container_width=True):
-                set_question_review_status(question_id, "active")
-                st.rerun()
-
-
-def _render_repair_card(row: dict) -> None:
-    rank = int(row["rank"])
-    flags = _parse_flags(row.get("validation_flags"))
-    flag_badges = "".join(
-        f'<span class="badge" style="color:#F97316;background:#431407CC;border:1px solid #F9731655;">{flag}</span>'
-        for flag in flags
-    )
-    status_html = _status_badge("needs_repair")
-    popularity_html = (
-        f"Weighted velocity: {float(row.get('weighted_mention_velocity') or 0.0):.2f}"
-        f" · Sources: {int(row.get('source_diversity') or 0)}"
-        f" · Extraction confidence: {float(row.get('extraction_confidence') or 0.0):.2f}"
-    )
-
-    st.markdown(
-        f"""
-<div class="q-card">
-  <div class="q-header">
-    {_rank_badge(rank)}
-    <div class="q-text">{row.get('question_text', '')}</div>
-  </div>
-  <div class="badges-row">
-    {_cat_badge(row.get('category', 'other'))}
-    {_type_badge(row.get('question_type', 'binary'))}
-    {status_html}
-  </div>
-  <div class="badges-row">{flag_badges}</div>
-  <div class="q-meta" style="margin-top:14px;">
-    <span class="meta-item">Repair priority: {popularity_html}</span>
-  </div>
-</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Repair details", expanded=False):
-        st.markdown(
-            '<div class="detail-header">Why It Failed</div>'
-            f'<div class="detail-text">{", ".join(flags) if flags else "No validation flags recorded."}</div>',
-            unsafe_allow_html=True,
-        )
-        if row.get("resolution_criteria"):
-            st.markdown(
-                '<div class="detail-header">Current Resolution Criteria</div>'
-                f'<div class="detail-text">{row["resolution_criteria"]}</div>',
-                unsafe_allow_html=True,
-            )
-        if row.get("rationale"):
-            st.markdown(
-                '<div class="detail-header">Original Rationale</div>'
-                f'<div class="detail-text muted">{row["rationale"]}</div>',
-                unsafe_allow_html=True,
-            )
-
-
-def _render_view(
-    label: str,
-    rows: list[dict],
-    search: str,
-    selected_cats: list[str],
-    type_choice: str,
-    min_score_pct: int,
-    sort_choice: str,
-) -> None:
-    if not rows:
-        st.markdown(
-            f"""
-<div class="empty-state">
-  <div class="empty-title">No {label.lower()} markets</div>
-  <div class="empty-sub">This section is currently empty.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    filtered = _filter_rows(rows, search, selected_cats, type_choice, min_score_pct, sort_choice)
-    if not filtered:
-        st.markdown(
-            """
-<div class="empty-state">
-  <div class="empty-title">No matches found</div>
-  <div class="empty-sub">Try broadening your search or relaxing the filters.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    suffix = f" &nbsp;&middot;&nbsp; filtered from <strong>{len(rows)}</strong>" if len(filtered) < len(rows) else ""
-    st.markdown(
-        f'<div class="results-bar"><strong>{len(filtered)}</strong> {label.lower()} market{"s" if len(filtered) != 1 else ""}{suffix}</div>',
-        unsafe_allow_html=True,
-    )
-
-    for row in filtered:
-        _render_card(row)
-        _render_actions(row, row.get("effective_status", "active"))
-
-
-def _render_repair_view(
-    rows: list[dict],
-    search: str,
-    selected_cats: list[str],
-    type_choice: str,
-    sort_choice: str,
-) -> None:
-    if not rows:
-        st.markdown(
-            """
-<div class="empty-state">
-  <div class="empty-title">No repair opportunities</div>
-  <div class="empty-sub">High-signal failed questions will appear here when they look salvageable.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    filtered = _filter_repair_rows(rows, search, selected_cats, type_choice, sort_choice)
-    if not filtered:
-        st.markdown(
-            """
-<div class="empty-state">
-  <div class="empty-title">No matches found</div>
-  <div class="empty-sub">Try broadening your search or relaxing the filters.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    suffix = f" &nbsp;&middot;&nbsp; filtered from <strong>{len(rows)}</strong>" if len(filtered) < len(rows) else ""
-    st.markdown(
-        f'<div class="results-bar"><strong>{len(filtered)}</strong> repair opportunit{"ies" if len(filtered) != 1 else "y"}{suffix}</div>',
-        unsafe_allow_html=True,
-    )
-
-    for row in filtered:
-        _render_repair_card(row)
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="Prediction Market Intelligence",
-        page_icon="🎯",
+        page_title="Prediction Market Discovery",
+        page_icon="📈",
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    init_db()
     _inject_css()
-
-    raw_rows = [dict(r) for r in get_dashboard_scored_questions()]
-    raw_repair_rows = [dict(r) for r in get_dashboard_repair_questions()]
-    all_rows = []
-    grouped_rows = {status: [] for status in STATUS_META}
-    for row in raw_rows:
-        item = dict(row)
-        item["effective_status"] = _effective_status(item)
-        all_rows.append(item)
-        grouped_rows[item["effective_status"]].append(item)
-
-    for status in grouped_rows:
-        grouped_rows[status] = _assign_display_ranks(grouped_rows[status])
-
-    active_rows = grouped_rows["active"]
-    selected_rows = grouped_rows["selected"]
-    removed_rows = grouped_rows["removed"]
-    expired_rows = grouped_rows["expired"]
-    repair_rows = _assign_repair_ranks(
-        [
-            dict(row)
-            for row in raw_repair_rows
-            if is_salvageable_validation_flags(_parse_flags(row.get("validation_flags")))
-            and not bool(row.get("has_repair_child"))
-        ]
-    )
-
-    hdr_left, hdr_right = st.columns([5, 1])
-    with hdr_left:
-        st.markdown(
-            """
-<div class="app-header">
-  <div class="app-title"><span>Prediction</span> Market Intelligence</div>
-  <div class="app-subtitle">Review scored questions, keep the best ones, and track selected, removed, and expired ideas separately.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with hdr_right:
-        st.write("")
-        if st.button("Refresh", use_container_width=True):
-            st.rerun()
-
-    repo_root = Path(__file__).resolve().parent
-    pipeline_path = str(repo_root / "pipeline.py")
-    python_executable = sys.executable
-    current_run = get_active_pipeline_run() or get_latest_pipeline_run()
-    current_run_id = int(current_run["id"]) if current_run else None
-    current_stage_rows = get_pipeline_run_stages(current_run_id) if current_run_id is not None else []
-
-    st.markdown("### Market Generator")
-    runner_left, runner_right = st.columns([3, 2])
-
-    active_run_in_progress = bool(current_run and current_run.get("status") in {"queued", "running"})
-    with runner_left:
-        fr3_mode_label = st.radio(
-            "Event Extraction Scope (FR3)",
-            ["Default", "Custom", "Process everything"],
-            horizontal=True,
-            help="Choose whether FR3 uses the default cluster cap, a custom cap, or no cap at all.",
-        )
-        fr3_custom_limit = None
-        if fr3_mode_label == "Custom":
-            fr3_custom_limit = st.number_input(
-                "FR3 max clusters",
-                min_value=1,
-                value=10,
-                step=1,
-                help="Maximum number of pending clusters to send through FR3 during this run.",
-            )
-
-        fr4_mode_label = st.radio(
-            "Question Generation Scope (FR4)",
-            ["Default", "Custom", "Process everything"],
-            horizontal=True,
-            help="Choose whether FR4 uses the default cap, a custom cap, or no cap at all.",
-        )
-        custom_limit = None
-        if fr4_mode_label == "Custom":
-            custom_limit = st.number_input(
-                "FR4 max events",
-                min_value=1,
-                value=5,
-                step=1,
-                help="Maximum number of extracted events to send through FR4 during this run.",
-            )
-
-        available_models = list(LLMConfig.AVAILABLE_MODELS)
-        selected_fr3_model = st.selectbox(
-            "FR3 model",
-            options=available_models,
-            index=_model_index(available_models, LLMConfig.RUNNER_DEFAULT_FR3_MODEL),
-            help="Model used for FR3 structured event extraction. The selector defaults to the configured runner model.",
-        )
-        selected_fr4_model = st.selectbox(
-            "FR4 model",
-            options=available_models,
-            index=_model_index(available_models, LLMConfig.RUNNER_DEFAULT_FR4_MODEL),
-            help="Model used for FR4 question generation and repair. The selector defaults to the configured runner model.",
-        )
-
-        run_clicked = st.button(
-            "Run Pipeline (FR1-FR6)",
-            type="primary",
-            disabled=active_run_in_progress,
-            help="Launch the full pipeline in the background and track progress here.",
-        )
-
-        if run_clicked:
-            fr3_mode = {
-                "Default": "default",
-                "Custom": "custom",
-                "Process everything": "all",
-            }[fr3_mode_label]
-            fr4_mode = {
-                "Default": "default",
-                "Custom": "custom",
-                "Process everything": "all",
-            }[fr4_mode_label]
-            run_id = create_pipeline_run(
-                stage_start=1,
-                stage_end=6,
-                fr3_limit_mode=fr3_mode,
-                fr3_limit_value=int(fr3_custom_limit) if fr3_custom_limit is not None else None,
-                fr4_limit_mode=fr4_mode,
-                fr4_limit_value=int(custom_limit) if custom_limit is not None else None,
-                log_mode="normal",
-                fr3_model=selected_fr3_model,
-                fr4_model=selected_fr4_model,
-            )
-            command = _build_pipeline_command(
-                python_executable=python_executable,
-                pipeline_path=pipeline_path,
-                fr3_mode=fr3_mode,
-                fr3_custom_limit=int(fr3_custom_limit) if fr3_custom_limit is not None else None,
-                fr4_mode=fr4_mode,
-                custom_limit=int(custom_limit) if custom_limit is not None else None,
-                log_mode="normal",
-                run_id=run_id,
-                fr3_model=selected_fr3_model,
-                fr4_model=selected_fr4_model,
-            )
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try:
-                process = subprocess.Popen(
-                    command,
-                    cwd=str(repo_root),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                )
-                mark_pipeline_run_started(run_id, subprocess_pid=process.pid)
-                st.session_state["current_pipeline_run_id"] = run_id
-                st.success(f"Started pipeline run #{run_id}. Click Refresh to update progress.")
-                st.rerun()
-            except Exception as exc:
-                mark_pipeline_run_failed(run_id, str(exc))
-                st.error(f"Unable to start the pipeline run: {exc}")
-
-    with runner_right:
-        if current_run:
-            progress_value = _pipeline_progress_value(current_stage_rows)
-            st.progress(progress_value, text=f"Run #{current_run['id']} - {str(current_run.get('status', 'queued')).title()}")
-            st.caption(
-                f"Started: {_format_run_timestamp(current_run.get('started_at'))} | "
-                f"Finished: {_format_run_timestamp(current_run.get('finished_at'))}"
-            )
-            st.caption(
-                f"FR3 mode: {current_run.get('fr3_limit_mode', 'default')} | "
-                f"FR3 limit: {current_run.get('fr3_limit_value') if current_run.get('fr3_limit_value') is not None else 'default/all'}"
-            )
-            st.caption(
-                f"FR4 mode: {current_run.get('fr4_limit_mode', 'default')} | "
-                f"FR4 limit: {current_run.get('fr4_limit_value') if current_run.get('fr4_limit_value') is not None else 'default/all'} | "
-                f"Log mode: {current_run.get('log_mode', 'normal')}"
-            )
-            if current_run.get("error_message"):
-                st.error(current_run["error_message"])
-            if active_run_in_progress:
-                cancel_clicked = st.button(
-                    "Cancel Run",
-                    use_container_width=True,
-                    help="Stop the background pipeline process and mark this run as cancelled.",
-                )
-                if cancel_clicked:
-                    pid = current_run.get("subprocess_pid")
-                    try:
-                        if pid:
-                            _terminate_process_tree(int(pid))
-                        cancel_pipeline_run(int(current_run["id"]), "Cancelled by user from dashboard")
-                        st.warning(f"Pipeline run #{current_run['id']} was cancelled.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Unable to cancel pipeline run #{current_run['id']}: {exc}")
-        else:
-            st.info("No pipeline runs yet. Start one here to generate fresh questions directly from the dashboard.")
-
-    if active_run_in_progress:
-        st.info("A pipeline run is in progress in the background. Use Refresh to pull the latest stage progress.")
-
-    if current_stage_rows:
-        stage_columns = st.columns(len(current_stage_rows))
-        for index, stage_row in enumerate(current_stage_rows):
-            stage_label = PIPELINE_STAGE_LABELS.get(
-                int(stage_row.get("stage_number") or 0),
-                stage_row.get("stage_name") or "Stage",
-            )
-            status = str(stage_row.get("status") or "pending").title()
-            with stage_columns[index]:
-                st.markdown(f"**{stage_label}**")
-                st.caption(status)
-                stage_progress = _stage_progress_value(stage_row)
-                if stage_progress is not None:
-                    st.progress(stage_progress)
-                info_lines = _stage_info_lines(stage_row, current_run)
-                if info_lines:
-                    with st.popover("i", help="Stage details"):
-                        for line in info_lines:
-                            st.caption(line)
-
-    st.markdown("---")
-
-    if all_rows:
-        categories = set((row.get("category") or "other").lower() for row in all_rows)
-        st.markdown(
-            f"""
-<div class="stat-grid">
-  <div class="stat-card"><div class="stat-value">{len(active_rows)}</div><div class="stat-label">Active Queue</div></div>
-  <div class="stat-card"><div class="stat-value">{len(selected_rows)}</div><div class="stat-label">Selected</div></div>
-  <div class="stat-card"><div class="stat-value">{len(removed_rows)}</div><div class="stat-label">Removed</div></div>
-  <div class="stat-card"><div class="stat-value">{len(expired_rows)}</div><div class="stat-label">Expired</div></div>
-  <div class="stat-card"><div class="stat-value" style="color:#F97316;">{len(categories)}</div><div class="stat-label">Categories</div></div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with st.sidebar:
-        st.markdown(
-            '<div style="font-size:20px;font-weight:800;color:#F1F5F9;letter-spacing:-0.4px;">🔧 Filters</div>'
-            '<div style="font-size:13px;color:#64748B;margin-top:4px;margin-bottom:20px;">Refine the visible market list</div>',
-            unsafe_allow_html=True,
-        )
-
-        search = st.text_input("Search", placeholder="e.g. Fed, Bitcoin, election", label_visibility="collapsed")
-        st.caption("Search question text")
-
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:#475569;margin:22px 0 8px 0;">Category</div>', unsafe_allow_html=True)
-        all_cats = sorted(set((row.get("category") or "other").lower() for row in all_rows))
-        selected_cats = st.multiselect(
-            "category",
-            options=all_cats,
-            default=all_cats,
-            format_func=lambda value: value.replace("_", " ").title(),
-            label_visibility="collapsed",
-        )
-
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:#475569;margin:22px 0 8px 0;">Question Type</div>', unsafe_allow_html=True)
-        type_choice = st.radio("type", ["All", "Binary", "Multiple Choice"], horizontal=True, label_visibility="collapsed")
-
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:#475569;margin:22px 0 8px 0;">Minimum Score</div>', unsafe_allow_html=True)
-        min_score_pct = st.slider(
-            "min_score",
-            0,
-            100,
-            0,
-            step=5,
-            label_visibility="collapsed",
-            help="Hide markets with a total score below this threshold",
-        )
-
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:#475569;margin:22px 0 8px 0;">Sort By</div>', unsafe_allow_html=True)
-        sort_choice = st.selectbox("sort", list(SORT_OPTIONS.keys()), label_visibility="collapsed")
-
-        st.markdown(
-            '<div style="margin-top:32px;padding-top:20px;border-top:1px solid #1E2535;">'
-            '<div style="font-size:11px;color:#334155;font-weight:500;line-height:1.6;">'
-            'Scores are weighted composites of market interest, resolution quality, '
-            'clarity, velocity, novelty, time horizon, and source diversity.'
-            '</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    if not all_rows:
-        st.markdown(
-            """
-<div class="empty-state">
-  <div class="empty-title">No markets scored yet</div>
-  <div class="empty-sub">Use the Pipeline Runner above to launch FR1-FR6, then refresh here to review the scored questions.</div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    active_tab, repair_tab, selected_tab, removed_tab, expired_tab = st.tabs(
-        ["Active", "Needs Repair", "Selected", "Removed", "Expired"]
-    )
-    with active_tab:
-        _render_view("Active", active_rows, search, selected_cats, type_choice, min_score_pct, sort_choice)
-    with repair_tab:
-        _render_repair_view(repair_rows, search, selected_cats, type_choice, sort_choice)
-    with selected_tab:
-        _render_view("Selected", selected_rows, search, selected_cats, type_choice, min_score_pct, sort_choice)
-    with removed_tab:
-        _render_view("Removed", removed_rows, search, selected_cats, type_choice, min_score_pct, sort_choice)
-    with expired_tab:
-        _render_view("Expired", expired_rows, search, selected_cats, type_choice, min_score_pct, sort_choice)
+    initialize_session_state()
+    data = load_dashboard_data()
+    render_header()
+    render_summary_metrics(data)
+    filters = render_sidebar_filters(data)
+    render_emerging_topics(data, filters)
+    render_category_explorer(data, filters)
+    render_active_markets(data, filters)
+    render_saved_items_sidebar()
+    render_admin_tools_collapsed()
 
 
 if __name__ == "__main__":

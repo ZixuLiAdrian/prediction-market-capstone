@@ -1,14 +1,14 @@
-# Prediction Market Discovery (Trader Intelligence Version)
+# Prediction Market Discovery (Tony Version)
 
 ## Overview
 
 This project is a staged prediction-market pipeline backed by PostgreSQL. It ingests real-world events, clusters related stories, extracts structured event specs with an LLM, generates candidate prediction-market questions, validates them, scores them, and surfaces them in a Streamlit dashboard.
 
-The Trader Intelligence version keeps the original FR1-FR6 pipeline structure, but changes the product framing of the Streamlit app. Instead of centering an internal review/admin queue, the dashboard is now positioned as a consumer-facing discovery experience for active markets and emerging topics.
+The Tony version keeps the original FR1-FR6 pipeline structure, but changes the product framing of the Streamlit app. Instead of centering an internal review/admin queue, the dashboard is now positioned as a consumer-facing discovery experience for active markets and emerging topics.
 
-## Trader Intelligence Version vs. Market Generator Version
+## Tony Version vs. Jack Version
 
-Compared with the earlier Market Generator version, this version differs in a few clear ways:
+Compared with the earlier Jack version, this version differs in a few clear ways:
 
 - The Streamlit app is now titled `Prediction Market Discovery`.
 - The UI emphasizes `Emerging Topics`, `Active Markets`, trend signals, and category exploration.
@@ -18,7 +18,7 @@ Compared with the earlier Market Generator version, this version differs in a fe
 - The app includes graceful demo fallback when the database is empty or temporarily unavailable.
 - This local setup has been configured and tested with PostgreSQL plus Gemini.
 
-In short: the Market Generator version is closer to an internal market-candidate review tool, while the Trader Intelligence version is closer to a Polymarket/Kalshi-style discovery page layered on top of the same pipeline.
+In short: Jack's version was closer to an internal market-candidate review tool, while Tony's version is closer to a Polymarket/Kalshi-style discovery page layered on top of the same pipeline.
 
 ## Architecture Summary
 
@@ -55,7 +55,7 @@ Code entry points:
 ## Project Structure
 
 ```text
-prediction-market-capstone-trader-intelligence/
+prediction-market-capstone-tony-final/
 |-- README.md
 |-- requirements.txt
 |-- .env.example
@@ -160,7 +160,7 @@ Important flags:
 python -m streamlit run streamlit_app.py
 ```
 
-The Trader Intelligence dashboard includes:
+The Tony dashboard includes:
 
 - top-level hero metrics
 - `Emerging Topics`
@@ -191,7 +191,7 @@ At the time of this version:
 
 ## Summary
 
-This Trader Intelligence version is best understood as:
+This Tony version is best understood as:
 
 - the same pipeline foundation as the original capstone
 - a different Streamlit product direction
