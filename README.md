@@ -307,6 +307,6 @@ The V2 codebase lives alongside V1 in [`Trader Intelligence Ver/`](Trader%20Inte
 | FR1–FR3 (Ingestion, Clustering, Extraction) | Zixu Li | Jack Jia | Zixu Li |
 | FR4 (Question Generation) | Jack Jia | Zixu Li | Jack Jia |
 | FR5–FR7 (Validation, Scoring, Dashboard) | Jia Herng Yap | | |
-| Trader Intelligence (V2) | Yanzhe Huang | | |
 | Final Integration | Jack Jia | Zixu Li | Jia Herng Yap |
 | Execution Testing | Jia Herng Yap | | |
+| Trader Intelligence (V2) | Yanzhe Huang | | |
